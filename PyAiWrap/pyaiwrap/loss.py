@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lpips
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
 
 
@@ -243,7 +243,7 @@ class GANLoss:
         self.criterion = criterion if criterion is not None else nn.L1Loss()
 
     def __call__(
-        self, 
+        self,
         models: Dict[str, nn.Module],
         batch: Tuple,
         metrics: Metrics,
@@ -383,4 +383,95 @@ class VAELoss:
             'loss': total_loss,
             'reconstruction_loss': reconstruction_loss,
             'kl_divergence': kl_divergence
+        }
+
+
+class GeneratorLoss:
+    """Loss function for image reconstruction generator"""
+
+    def __init__(
+        self,
+        reconstruction_loss_fn: nn.Module = nn.MSELoss(),
+        perceptual_weight: float = 0.0,
+        use_lpips: bool = False,
+        lpips_net: str = 'alex',
+        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ):
+        """
+        Initialize generator loss function.
+
+        Args:
+            reconstruction_loss_fn: Loss function for reconstruction (default: MSELoss)
+            perceptual_weight: Weight for perceptual loss (0 to disable)
+            use_lpips: Whether to use LPIPS for perceptual loss (default: False)
+            lpips_net: Network to use for LPIPS ('alex', 'vgg', 'squeeze') (default: 'alex')
+            device: Device to place LPIPS network on
+        """
+        self.reconstruction_loss_fn = reconstruction_loss_fn
+        self.perceptual_weight = perceptual_weight
+        self.use_lpips = use_lpips
+
+        self.perceptual_loss_fn = None
+        if use_lpips and perceptual_weight > 0:
+            self.perceptual_loss_fn = lpips.LPIPS(net=lpips_net).to(device)
+            self.perceptual_loss_fn.eval()
+            for param in self.perceptual_loss_fn.parameters():
+                param.requires_grad = False
+
+    def __call__(
+        self,
+        models: Dict[str, nn.Module],
+        batch: Tuple,
+        metrics: object,
+        gradient_clip: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculate generator loss and update metrics.
+
+        Args:
+            models: Dictionary containing the generator model (e.g., {'generator': generator_model})
+            batch: Tuple of (modified_images, original_images)
+            metrics: Metrics object with accumulate() method
+            gradient_clip: Gradient clipping value (None to disable)
+
+        Returns:
+            Dictionary with 'loss' key containing the total loss tensor
+        """
+        if 'generator' not in models:
+            raise ValueError("models dictionary must contain 'generator' key")
+        generator = models['generator']
+
+        modified_images, original_images = batch[0], batch[1]
+
+        reconstructed_images = generator(modified_images)
+
+        reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
+
+        perceptual_loss = torch.tensor(0.0, device=reconstruction_loss.device)
+        if self.perceptual_weight > 0 and self.perceptual_loss_fn is not None:
+            # LPIPS expects images in range [-1, 1]
+            recon_normalized = reconstructed_images * 2.0 - 1.0
+            original_normalized = original_images * 2.0 - 1.0
+
+            # LPIPS returns a tensor of shape (batch_size, 1, 1, 1)
+            perceptual_loss = self.perceptual_loss_fn(recon_normalized, original_normalized).mean()
+
+        total_loss = reconstruction_loss + self.perceptual_weight * perceptual_loss
+
+        if torch.is_grad_enabled():
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
+            total_loss.backward()
+
+        metrics.accumulate({
+            'total_loss': total_loss.item(),
+            'reconstruction_loss': reconstruction_loss.item(),
+            'perceptual_loss': perceptual_loss.item() if self.perceptual_weight > 0 else 0.0
+        })
+
+        return {
+            'loss': total_loss,
+            'reconstruction_loss': reconstruction_loss,
+            'perceptual_loss': perceptual_loss,
+            'reconstructed_images': reconstructed_images
         }

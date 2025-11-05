@@ -8,6 +8,9 @@ def visualizeReconstruction(original_images: torch.Tensor,
                             reconstructed_images: torch.Tensor,
                             epoch: int,
                             save_path: str,
+                            model_type: str,
+                            launch_number: str,
+                            hyperparams_id: str,
                             num_images: int = 8):
     """
     Create a visualization showing original, modified, and reconstructed images stacked vertically.
@@ -36,7 +39,7 @@ def visualizeReconstruction(original_images: torch.Tensor,
     grid = make_grid(comparison, nrow=num_images, padding=2, normalize=False)
 
     os.makedirs(save_path, exist_ok=True)
-    save_file = os.path.join(save_path, f'reconstruction_epoch_{epoch:03d}.png')
+    save_file = os.path.join(save_path, f'{model_type}_{launch_number}_{hyperparams_id}_reconstruction_epoch_{epoch:03d}.png')
     save_image(grid, save_file)
 
 
@@ -48,11 +51,9 @@ def visualizeReconstructionGrid(modified_images, reconstructed_images, epoch, sa
     modified_images = modified_images.detach().cpu()[:num_images]
     reconstructed_images = reconstructed_images.detach().cpu()[:num_images]
 
-    # Denormalize
     modified_images = torch.clamp(modified_images, 0, 1)
     reconstructed_images = torch.clamp(reconstructed_images, 0, 1)
 
-    # Interleave modified and reconstructed images
     comparison = torch.stack([modified_images, reconstructed_images], dim=1)
     comparison = comparison.view(-1, *modified_images.shape[1:])
 

@@ -7,18 +7,18 @@ from typing import List, Tuple
 
 
 class PairedImageFolder(Dataset):
-    def __init__(self, images_folder_path, modification_transform, resize_transform):
+    def __init__(self, images_folder_path, input_transform, target_transform):
         """
         images_folder_path: path to folder with images
         modification_transform: transform applied to modified images
         resize_transform: transform applied to real images
         """
 
-        self.modified_dataset = ImageFolder(images_folder_path, transform=modification_transform)
-        self.real_dataset = ImageFolder(images_folder_path, transform=resize_transform)
+        self._input_dataset = ImageFolder(images_folder_path, transform=input_transform)
+        self._target_dataset = ImageFolder(images_folder_path, transform=target_transform)
 
-        assert len(self.modified_dataset) == len(self.real_dataset), \
-            f"Dataset length mismatch: {len(self.modified_dataset)} vs {len(self.real_dataset)}"
+        assert len(self._input_dataset) == len(self._target_dataset), \
+            f"Dataset length mismatch: {len(self._input_dataset)} vs {len(self._target_dataset)}"
 
         # Verify that pairs correspond
         self._verify_pairs()
@@ -26,9 +26,9 @@ class PairedImageFolder(Dataset):
     def _verify_pairs(self):
         """Verify that modified_dataset[i] and real_dataset[i] are the same image"""
 
-        for iterator in range(len(self.modified_dataset)):
-            mod_path, _ = self.modified_dataset.samples[iterator]
-            real_path, _ = self.real_dataset.samples[iterator]
+        for iterator in range(len(self._input_dataset)):
+            mod_path, _ = self._input_dataset.samples[iterator]
+            real_path, _ = self._target_dataset.samples[iterator]
 
             mod_filename = os.path.basename(mod_path)
             real_filename = os.path.basename(real_path)
@@ -41,11 +41,11 @@ class PairedImageFolder(Dataset):
                 )
 
     def __len__(self):
-        return len(self.modified_dataset)
+        return len(self._input_dataset)
 
     def __getitem__(self, idx):
-        modified_img, modified_label = self.modified_dataset[idx]
-        real_img, real_label = self.real_dataset[idx]
+        modified_img, modified_label = self._input_dataset[idx]
+        real_img, real_label = self._target_dataset[idx]
 
         return modified_img, real_img, modified_label, real_label
 

@@ -4,45 +4,6 @@ from tqdm import tqdm
 import os
 from typing import Any, Dict, Callable, Optional, Tuple
 from .metrics import Metrics
-import json
-
-
-def loadHyperparameters(json_path: str) -> Dict[str, Any]:
-    """
-    Load hyperparameters from a JSON file with generic defaults.
-
-    Args:
-        json_path (str): Path to the JSON file containing hyperparameters.
-
-    Returns:
-        Dict[str, Any]: A dictionary with hyperparameters and their values.
-    """
-    with open(json_path, "r") as f:
-        hyperparams = json.load(f)
-
-    defaults = {
-        "BATCH_SIZE": 1,
-        "TRAIN_DATA_PATH": "./data/DIV2K_train_LR_bicubic/X4",
-        "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
-        "HYPERPARAMS_ID": "0",
-        "ARCHITECTURE_ID": "0",
-        "LEARNING_RATE": 0.0001,
-        "GAMMA": 0.99,
-        "IMAGE_RESIZE": 64,
-        "INPUT_CHANNELS": 3,
-        "KERNEL_SIZE": 3,
-        "EPOCHS": 100,
-        "DIAGRAMS_DATA_PATH": "./diagrams_data",
-        "WEIGHTS_PATH": "./weights",
-        "PATIENCE": 15,
-        "DIAGRAMS_PATH": "./diagrams",
-        "VISUALIZE_EVERY": 10
-    }
-
-    for key, default_value in defaults.items():
-        hyperparams.setdefault(key, default_value)
-
-    return hyperparams
 
 
 def train(
@@ -78,11 +39,11 @@ def train(
         loss_fn (Callable[[Dict[str, nn.Module], Tuple, Metrics, Optional[float]], Dict[str, Any]]):
                            Loss function that takes (models, batch, metrics, gradient_clip) and returns dict with 'loss' key.
                            Signature: loss_fn(models: Dict[str, nn.Module],
-                                            batch: Tuple, 
+                                            batch: Tuple,
                                             metrics: Metrics,
                                             gradient_clip: Optional[float]) -> Dict[str, Any]
                            Must return a dict with at least 'loss' key containing the tensor for backpropagation.
-                           The function should handle backward() and gradient clipping internally, 
+                           The function should handle backward() and gradient clipping internally,
                            and update metrics during each batch.
         metrics (Metrics): Custom metrics object that is updated by loss_fn during batch processing.
                          Should have display(epoch), finalizeEpoch(epoch), setPhase(phase) methods,
@@ -100,8 +61,8 @@ def train(
         model_type (str): Type of model (for naming files).
         gradient_clip (Optional[float]): Gradient clipping value. None to disable. Passed to loss_fn.
         control_fn (Optional[Callable]): Function for visualization/control.
-                                        Signature: control_fn(models: Dict[str, nn.Module], 
-                                                             train_batch: Tuple, 
+                                        Signature: control_fn(models: Dict[str, nn.Module],
+                                                             train_batch: Tuple,
                                                              val_batch: Tuple,
                                                              epoch: int,
                                                              diagrams_path: str,
