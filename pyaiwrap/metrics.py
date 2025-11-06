@@ -243,17 +243,19 @@ class VAEMetrics(BaseMetrics):
 class GeneratorColorizationMetrics(BaseMetrics):
     """Metrics tracking for Generator Colorization training with colorfulness metric"""
 
-    def __init__(self, use_colorfulness: bool = False):
+    def __init__(self, use_colorfulness: bool = False, use_perceptual_loss: bool = True):
         metric_keys = [
             'total_loss',
-            'reconstruction_loss',
-            'perceptual_loss'
+            'reconstruction_loss'
         ]
         self._use_colorfulness = use_colorfulness
         if self._use_colorfulness:
             metric_keys.extend(['colorfulness_loss',
                                 'colorfulness_recon',
                                 'colorfulness_original'])
+        self._use_perceptual_loss = use_perceptual_loss
+        if self._use_perceptual_loss:
+            metric_keys.append("perceptual_loss")
         super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
@@ -269,7 +271,8 @@ class GeneratorColorizationMetrics(BaseMetrics):
             loss_parts = [f"Total: {metrics_dict['total_loss']:.6f}"]
             loss_parts.append(f"Recon: {metrics_dict['reconstruction_loss']:.6f}")
 
-            loss_parts.append(f"Percept: {metrics_dict['perceptual_loss']:.6f}")
+            if self._use_perceptual_loss:
+                loss_parts.append(f"Percept: {metrics_dict['perceptual_loss']:.6f}")
 
             if self._use_colorfulness:
                 loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
