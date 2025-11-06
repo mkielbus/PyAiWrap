@@ -500,14 +500,12 @@ class GeneratorColorizationLoss:
 
         reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
 
-        # (LPIPS)
+        # Perceptual loss (LPIPS)
         perceptual_loss = torch.tensor(0.0, device=reconstruction_loss.device)
         if self.perceptual_weight > 0 and self.perceptual_loss_fn is not None:
             # LPIPS expects images in range [-1, 1]
             recon_normalized = reconstructed_images * 2.0 - 1.0
             original_normalized = original_images * 2.0 - 1.0
-
-            # LPIPS returns a tensor of shape (batch_size, 1, 1, 1)
             perceptual_loss = self.perceptual_loss_fn(recon_normalized, original_normalized).mean()
 
         colorfulness_loss = torch.tensor(0.0, device=reconstruction_loss.device)
@@ -516,12 +514,12 @@ class GeneratorColorizationLoss:
 
         if self.colorfulness_weight > 0:
             colorfulness_recon = calculateColorfulnessLoss(reconstructed_images)
+            colorfulness_original = calculateColorfulnessLoss(original_images)
 
             if self.colorfulness_target is not None:
                 target = torch.tensor(self.colorfulness_target, device=reconstructed_images.device)
                 colorfulness_loss = torch.abs(colorfulness_recon - target)
             else:
-                colorfulness_original = calculateColorfulnessLoss(original_images)
                 colorfulness_loss = torch.abs(colorfulness_recon - colorfulness_original)
 
         total_loss = (reconstruction_loss +
@@ -537,10 +535,10 @@ class GeneratorColorizationLoss:
         metrics.accumulate({
             'total_loss': total_loss.item(),
             'reconstruction_loss': reconstruction_loss.item(),
-            'perceptual_loss': perceptual_loss.item() if self.perceptual_weight > 0 else 0.0,
-            'colorfulness_loss': colorfulness_loss.item() if self.colorfulness_weight > 0 else 0.0,
-            'colorfulness_recon': colorfulness_recon.item() if self.colorfulness_weight > 0 else 0.0,
-            'colorfulness_original': colorfulness_original.item() if self.colorfulness_weight > 0 else 0.0
+            'perceptual_loss': perceptual_loss.item(),
+            'colorfulness_loss': colorfulness_loss.item(),
+            'colorfulness_recon': colorfulness_recon.item(),
+            'colorfulness_original': colorfulness_original.item()
         })
 
         return {

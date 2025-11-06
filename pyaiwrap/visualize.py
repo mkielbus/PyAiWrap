@@ -28,12 +28,12 @@ def visualizeReconstruction(original_images: torch.Tensor,
         hyperparams_id: Hyperparameters ID (for filename)
         num_images: Number of image triplets to show
     """
-    # Move to CPU and limit number of images
     original_images = original_images.detach().cpu()[:num_images]
     modified_images = modified_images.detach().cpu()[:num_images]
     reconstructed_images = reconstructed_images.detach().cpu()[:num_images]
 
-    # Clamp values to valid range
+    actual_num_images = min(num_images, original_images.shape[0])
+
     original_images = torch.clamp(original_images, 0, 1)
     modified_images = torch.clamp(modified_images, 0, 1)
     reconstructed_images = torch.clamp(reconstructed_images, 0, 1)
@@ -50,7 +50,7 @@ def visualizeReconstruction(original_images: torch.Tensor,
     comparison = torch.cat([original_images, modified_images, reconstructed_images], dim=0)
 
     # Make grid with num_images per row
-    grid = make_grid(comparison, nrow=num_images, padding=2, normalize=False)
+    grid = make_grid(comparison, nrow=actual_num_images, padding=2, normalize=False)
 
     os.makedirs(save_path, exist_ok=True)
     save_file = os.path.join(save_path,
