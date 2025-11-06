@@ -283,18 +283,18 @@ class GANLoss:
         loss_discriminator = loss_real + loss_fake
 
         if torch.is_grad_enabled():
+            loss_discriminator.backward()
             if gradient_clip is not None:
                 torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=gradient_clip)
-            loss_discriminator.backward()
 
         output_fake_for_gen = discriminator(fake_images)
         label_gen = torch.ones((batch_size, 1), dtype=torch.float, device=device)
         loss_generator = self.criterion(output_fake_for_gen, label_gen)
 
         if torch.is_grad_enabled():
+            loss_generator.backward()
             if gradient_clip is not None:
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
-            loss_generator.backward()
 
         total_loss = loss_generator + loss_discriminator
 
@@ -369,9 +369,10 @@ class VAELoss:
         total_loss = reconstruction_loss + self.kl_weight * kl_divergence
 
         if torch.is_grad_enabled():
+            total_loss.backward()
+
             if gradient_clip is not None:
                 torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=gradient_clip)
-            total_loss.backward()
 
         metrics.accumulate({
             'total_loss': total_loss.item(),
@@ -386,13 +387,58 @@ class VAELoss:
         }
 
 
-class GeneratorLoss:
-    """Loss function for image reconstruction generator"""
+def calculateColorfulnessLoss(images: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate colorfulness metric as differentiable loss.
+    Based on Hasler & Süsstrunk (2003).
+
+    Args:
+        images: RGB images in range [0, 1], shape (B, 3, H, W)
+
+    Returns:
+        Mean colorfulness score for the batch
+    """
+    # Scale to [0, 255] for sRGB
+    images_scaled = images * 255.0
+
+    # Extract RGB channels
+    R = images_scaled[:, 0, :, :]
+    G = images_scaled[:, 1, :, :]
+    B = images_scaled[:, 2, :, :]
+
+    # Compute opponent color space components
+    rg = R - G
+    yb = 0.5 * (R + G) - B
+
+    # Compute standard deviations along spatial dimensions
+    # std = sqrt(E[X^2] - E[X]^2)
+    sigma_rg = torch.std(rg.reshape(rg.shape[0], -1), dim=1)
+    sigma_yb = torch.std(yb.reshape(yb.shape[0], -1), dim=1)
+
+    # Compute means along spatial dimensions
+    mu_rg = torch.mean(rg.reshape(rg.shape[0], -1), dim=1)
+    mu_yb = torch.mean(yb.reshape(yb.shape[0], -1), dim=1)
+
+    # Compute σ_rgyb and μ_rgyb
+    sigma_rgyb = torch.sqrt(sigma_rg**2 + sigma_yb**2)
+    mu_rgyb = torch.sqrt(mu_rg**2 + mu_yb**2)
+
+    # Compute colorfulness metric M
+    M = sigma_rgyb + 0.3 * mu_rgyb
+
+    # Return mean over batch
+    return M.mean()
+
+
+class GeneratorColorizationLoss:
+    """Loss function for image reconstruction generator with colorfulness metric"""
 
     def __init__(
         self,
         reconstruction_loss_fn: nn.Module = nn.MSELoss(),
         perceptual_weight: float = 0.0,
+        colorfulness_weight: float = 0.0,
+        colorfulness_target: Optional[float] = None,
         use_lpips: bool = False,
         lpips_net: str = 'alex',
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -403,20 +449,27 @@ class GeneratorLoss:
         Args:
             reconstruction_loss_fn: Loss function for reconstruction (default: MSELoss)
             perceptual_weight: Weight for perceptual loss (0 to disable)
+            colorfulness_weight: Weight for colorfulness loss (0 to disable)
+            colorfulness_target: Target colorfulness value (if None, matches original)
             use_lpips: Whether to use LPIPS for perceptual loss (default: False)
             lpips_net: Network to use for LPIPS ('alex', 'vgg', 'squeeze') (default: 'alex')
             device: Device to place LPIPS network on
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.perceptual_weight = perceptual_weight
+        self.colorfulness_weight = colorfulness_weight
+        self.colorfulness_target = colorfulness_target
         self.use_lpips = use_lpips
+        self.device = device
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
+            print(f"Initializing LPIPS with {lpips_net} network...")
             self.perceptual_loss_fn = lpips.LPIPS(net=lpips_net).to(device)
             self.perceptual_loss_fn.eval()
             for param in self.perceptual_loss_fn.parameters():
                 param.requires_grad = False
+            print("LPIPS initialized successfully")
 
     def __call__(
         self,
@@ -447,6 +500,7 @@ class GeneratorLoss:
 
         reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
 
+        # (LPIPS)
         perceptual_loss = torch.tensor(0.0, device=reconstruction_loss.device)
         if self.perceptual_weight > 0 and self.perceptual_loss_fn is not None:
             # LPIPS expects images in range [-1, 1]
@@ -456,22 +510,43 @@ class GeneratorLoss:
             # LPIPS returns a tensor of shape (batch_size, 1, 1, 1)
             perceptual_loss = self.perceptual_loss_fn(recon_normalized, original_normalized).mean()
 
-        total_loss = reconstruction_loss + self.perceptual_weight * perceptual_loss
+        colorfulness_loss = torch.tensor(0.0, device=reconstruction_loss.device)
+        colorfulness_recon = torch.tensor(0.0, device=reconstruction_loss.device)
+        colorfulness_original = torch.tensor(0.0, device=reconstruction_loss.device)
+
+        if self.colorfulness_weight > 0:
+            colorfulness_recon = calculateColorfulnessLoss(reconstructed_images)
+
+            if self.colorfulness_target is not None:
+                target = torch.tensor(self.colorfulness_target, device=reconstructed_images.device)
+                colorfulness_loss = torch.abs(colorfulness_recon - target)
+            else:
+                colorfulness_original = calculateColorfulnessLoss(original_images)
+                colorfulness_loss = torch.abs(colorfulness_recon - colorfulness_original)
+
+        total_loss = (reconstruction_loss +
+                      self.perceptual_weight * perceptual_loss +
+                      self.colorfulness_weight * colorfulness_loss)
 
         if torch.is_grad_enabled():
+            total_loss.backward()
+
             if gradient_clip is not None:
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
-            total_loss.backward()
 
         metrics.accumulate({
             'total_loss': total_loss.item(),
             'reconstruction_loss': reconstruction_loss.item(),
-            'perceptual_loss': perceptual_loss.item() if self.perceptual_weight > 0 else 0.0
+            'perceptual_loss': perceptual_loss.item() if self.perceptual_weight > 0 else 0.0,
+            'colorfulness_loss': colorfulness_loss.item() if self.colorfulness_weight > 0 else 0.0,
+            'colorfulness_recon': colorfulness_recon.item() if self.colorfulness_weight > 0 else 0.0,
+            'colorfulness_original': colorfulness_original.item() if self.colorfulness_weight > 0 else 0.0
         })
 
         return {
             'loss': total_loss,
             'reconstruction_loss': reconstruction_loss,
             'perceptual_loss': perceptual_loss,
+            'colorfulness_loss': colorfulness_loss,
             'reconstructed_images': reconstructed_images
         }

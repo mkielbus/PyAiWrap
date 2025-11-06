@@ -12,15 +12,15 @@ class ImageTransform(ABC):
     def __call__(self, img):
         pass
 
-    def _handle_tensor(self, img):
+    def _handleTensor(self, img):
         """Override in subclass to handle tensor input"""
         raise NotImplementedError
 
-    def _handle_numpy(self, img):
+    def _handleNumpy(self, img):
         """Override in subclass to handle numpy input"""
         raise NotImplementedError
 
-    def _handle_pil(self, img):
+    def _handlePil(self, img):
         """Override in subclass to handle PIL input"""
         raise NotImplementedError
 
@@ -42,15 +42,15 @@ class ToGrayscale(ImageTransform):
     def __call__(self, img):
         """Apply grayscale conversion"""
         if isinstance(img, torch.Tensor):
-            return self._handle_tensor(img)
+            return self._handleTensor(img)
         elif isinstance(img, np.ndarray):
-            return self._handle_numpy(img)
+            return self._handleNumpy(img)
         elif isinstance(img, Image.Image):
-            return self._handle_pil(img)
+            return self._handlePil(img)
         else:
             raise TypeError(f"Unsupported type: {type(img)}")
 
-    def _handle_tensor(self, img):
+    def _handleTensor(self, img):
         """Convert tensor to grayscale"""
         if img.shape[0] == 1:
             return img.repeat(3, 1, 1) if self.num_output_channels == 3 else img
@@ -61,7 +61,7 @@ class ToGrayscale(ImageTransform):
 
         return gray.repeat(3, 1, 1) if self.num_output_channels == 3 else gray
 
-    def _handle_numpy(self, img):
+    def _handleNumpy(self, img):
         """Convert numpy array to grayscale"""
         if img.ndim == 2:
             return np.stack([img] * 3, axis=2) if self.num_output_channels == 3 else img
@@ -75,7 +75,7 @@ class ToGrayscale(ImageTransform):
 
         raise ValueError(f"Unsupported numpy array shape: {img.shape}")
 
-    def _handle_pil(self, img):
+    def _handlePil(self, img):
         """Convert PIL Image to grayscale"""
         return TF.to_grayscale(img, num_output_channels=self.num_output_channels)
 
@@ -105,15 +105,15 @@ class ExtractChannel(ImageTransform):
     def __call__(self, img):
         """Extract specified channel"""
         if isinstance(img, torch.Tensor):
-            return self._handle_tensor(img)
+            return self._handleTensor(img)
         elif isinstance(img, np.ndarray):
-            return self._handle_numpy(img)
+            return self._handleNumpy(img)
         elif isinstance(img, Image.Image):
-            return self._handle_pil(img)
+            return self._handlePil(img)
         else:
             raise TypeError(f"Unsupported type: {type(img)}")
 
-    def _handle_tensor(self, img):
+    def _handleTensor(self, img):
         """Extract channel from tensor"""
         if img.shape[0] == 1:
             return img.repeat(3, 1, 1) if self.num_output_channels == 3 else img
@@ -121,7 +121,7 @@ class ExtractChannel(ImageTransform):
         channel = img[self.channel_index:self.channel_index+1, :, :]
         return channel.repeat(3, 1, 1) if self.num_output_channels == 3 else channel
 
-    def _handle_numpy(self, img):
+    def _handleNumpy(self, img):
         """Extract channel from numpy array"""
         if img.ndim == 2:
             return np.stack([img] * 3, axis=2) if self.num_output_channels == 3 else img
@@ -135,7 +135,7 @@ class ExtractChannel(ImageTransform):
 
         raise ValueError(f"Unsupported numpy array shape: {img.shape}")
 
-    def _handle_pil(self, img):
+    def _handlePil(self, img):
         """Extract channel from PIL Image"""
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -172,13 +172,13 @@ class ExtractChannelTo3Channel(ImageTransform):
     def __call__(self, img):
         """Extract channel and create 3-channel output"""
         if isinstance(img, torch.Tensor):
-            return self._handle_tensor(img)
+            return self._handleTensor(img)
         elif isinstance(img, Image.Image):
-            return self._handle_pil(img)
+            return self._handlePil(img)
         else:
             raise TypeError(f"Unsupported type: {type(img)}. Use PIL Image or Tensor.")
 
-    def _handle_tensor(self, img):
+    def _handleTensor(self, img):
         """Extract channel from tensor and create 3-channel output"""
         if img.shape[0] == 1:
             result = torch.zeros(3, img.shape[1], img.shape[2])
@@ -190,7 +190,7 @@ class ExtractChannelTo3Channel(ImageTransform):
         result[self.channel_index:self.channel_index+1, :, :] = channel
         return result
 
-    def _handle_pil(self, img):
+    def _handlePil(self, img):
         """Extract channel from PIL Image and create 3-channel tensor"""
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -202,6 +202,10 @@ class ExtractChannelTo3Channel(ImageTransform):
         result[:, :, self.channel_index] = channel
 
         return torch.from_numpy(result).permute(2, 0, 1).float() / 255.0
+
+    def _handleNumpy(self, img):
+        """Not implemented for this transform"""
+        raise NotImplementedError("ExtractChannelTo3Channel does not support numpy arrays")
 
     def __repr__(self):
         channel_names = ['Red', 'Green', 'Blue']

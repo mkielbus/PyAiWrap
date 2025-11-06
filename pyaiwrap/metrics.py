@@ -34,33 +34,24 @@ class Metrics(ABC):
         pass
 
 
-class GANMetrics(Metrics):
-    """Metrics tracking for GAN training"""
+class BaseMetrics(Metrics):
+    """Base implementation of common metrics functionality"""
 
-    def __init__(self):
-        self._history = {
-            'train': [],
-            'val': []
-        }
+    def __init__(self, metric_keys: List[str]):
+        """
+        Initialize base metrics.
+
+        Args:
+            metric_keys: List of metric names to track
+        """
+        self.metric_keys = metric_keys
+        self._history = {'train': [], 'val': []}
         self._batch_data = {
-            'train': {
-                'generator_losses': [],
-                'discriminator_losses': [],
-                'discriminator_real_acc': [],
-                'discriminator_fake_acc': []
-            },
-            'val': {
-                'generator_losses': [],
-                'discriminator_losses': [],
-                'discriminator_real_acc': [],
-                'discriminator_fake_acc': []
-            }
+            'train': {key: [] for key in metric_keys},
+            'val': {key: [] for key in metric_keys}
         }
         self._current_phase = 'train'
-        self._current_epoch_metrics = {
-            'train': None,
-            'val': None
-        }
+        self._current_epoch_metrics = {'train': None, 'val': None}
 
     def setPhase(self, phase: str) -> None:
         """Set current phase (train/val)"""
@@ -73,14 +64,11 @@ class GANMetrics(Metrics):
         Accumulate metrics during batch processing.
 
         Args:
-            loss_dict: Dictionary containing 'generator_loss', 'discriminator_loss',
-                      'discriminator_real_acc', 'discriminator_fake_acc'
+            loss_dict: Dictionary containing metric values
         """
         phase_data = self._batch_data[self._current_phase]
-        phase_data['generator_losses'].append(loss_dict.get('generator_loss', 0.0))
-        phase_data['discriminator_losses'].append(loss_dict.get('discriminator_loss', 0.0))
-        phase_data['discriminator_real_acc'].append(loss_dict.get('discriminator_real_acc', 0.0))
-        phase_data['discriminator_fake_acc'].append(loss_dict.get('discriminator_fake_acc', 0.0))
+        for key in self.metric_keys:
+            phase_data[key].append(loss_dict.get(key, 0.0))
 
     def finalizeEpoch(self, epoch: int) -> None:
         """
@@ -92,70 +80,19 @@ class GANMetrics(Metrics):
         for phase in ['train', 'val']:
             phase_data = self._batch_data[phase]
 
-            if not phase_data['generator_losses']:
+            first_key = self.metric_keys[0]
+            if not phase_data[first_key]:
                 self._current_epoch_metrics[phase] = None
                 continue
 
-            avg_gen_loss = np.mean(phase_data['generator_losses'])
-            avg_disc_loss = np.mean(phase_data['discriminator_losses'])
-            avg_real_acc = np.mean(phase_data['discriminator_real_acc'])
-            avg_fake_acc = np.mean(phase_data['discriminator_fake_acc'])
-
-            metrics_dict = {
-                'epoch': epoch,
-                'generator_loss': avg_gen_loss,
-                'discriminator_loss': avg_disc_loss,
-                'discriminator_real_acc': avg_real_acc,
-                'discriminator_fake_acc': avg_fake_acc
-            }
+            metrics_dict = {'epoch': epoch}
+            for key in self.metric_keys:
+                metrics_dict[key] = np.mean(phase_data[key])
 
             self._history[phase].append(metrics_dict)
             self._current_epoch_metrics[phase] = metrics_dict
 
-            self._batch_data[phase] = {
-                'generator_losses': [],
-                'discriminator_losses': [],
-                'discriminator_real_acc': [],
-                'discriminator_fake_acc': []
-            }
-
-    def display(self, epoch: int) -> None:
-        """
-        Display aggregated metrics for both train and val phases.
-
-        Args:
-            epoch: Current epoch number
-        """
-        for phase in ['train', 'val']:
-            metrics_dict = self._current_epoch_metrics[phase]
-
-            if metrics_dict is None:
-                print(f"Epoch {epoch} [{phase}]: No data")
-                continue
-
-            avg_gen_loss = metrics_dict['generator_loss']
-            avg_disc_loss = metrics_dict['discriminator_loss']
-            avg_real_acc = metrics_dict['discriminator_real_acc']
-            avg_fake_acc = metrics_dict['discriminator_fake_acc']
-
-            phase_label = "Train" if phase == 'train' else "Val  "
-            print(
-                f"Epoch {epoch} [{phase_label}]: "
-                f"G loss: {avg_gen_loss:.4f} | "
-                f"D loss: {avg_disc_loss:.4f} | "
-                f"D real acc: {avg_real_acc:.2f} | "
-                f"D fake acc: {avg_fake_acc:.2f}"
-            )
-
-            if phase == 'val':
-                if avg_real_acc < 0.5 and avg_fake_acc < 0.5:
-                    print("  ⚠️  WARNING: Discriminator performing poorly on both real and fake!")
-                elif avg_real_acc > 0.9 and avg_fake_acc > 0.9:
-                    print("  ⚠️  WARNING: Discriminator too strong - generator may not learn!")
-
-        if self._history['val']:
-            best_gen_loss = min(entry['generator_loss'] for entry in self._history['val'])
-            print(f"  Best val generator loss: {best_gen_loss:.4f}")
+            self._batch_data[phase] = {key: [] for key in self.metric_keys}
 
     def getMetric(self, epoch: int, phase: str, metric_name: str) -> float:
         """
@@ -164,7 +101,7 @@ class GANMetrics(Metrics):
         Args:
             epoch: Epoch number
             phase: 'train' or 'val'
-            metric_name: Name of metric (e.g., 'generator_loss', 'discriminator_loss')
+            metric_name: Name of metric
 
         Returns:
             Metric value or inf if not found
@@ -181,7 +118,7 @@ class GANMetrics(Metrics):
         Args:
             path: Directory path to save metrics
             hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (e.g., 'gan')
+            model_type: Type of model
             launch_number: Launch number for this training run
         """
         os.makedirs(path, exist_ok=True)
@@ -200,124 +137,92 @@ class GANMetrics(Metrics):
         with open(filepath, 'w') as f:
             json.dump(metrics_data, f, indent=2)
 
+        print(f"Metrics saved to: {filepath}")
+
     def getHistoryLists(self) -> Dict[str, List[float]]:
         """
-        Get metrics history as lists (for backward compatibility).
+        Get metrics history as lists.
 
         Returns:
             Dictionary containing lists of metrics
         """
-        result = {
-            'generator_train_losses': [],
-            'discriminator_train_losses': [],
-            'discriminator_train_real_acc': [],
-            'discriminator_train_fake_acc': [],
-            'generator_val_losses': [],
-            'discriminator_val_losses': [],
-            'discriminator_val_real_acc': [],
-            'discriminator_val_fake_acc': []
-        }
+        result = {}
 
-        for entry in self._history['train']:
-            result['generator_train_losses'].append(entry['generator_loss'])
-            result['discriminator_train_losses'].append(entry['discriminator_loss'])
-            result['discriminator_train_real_acc'].append(entry['discriminator_real_acc'])
-            result['discriminator_train_fake_acc'].append(entry['discriminator_fake_acc'])
-
-        for entry in self._history['val']:
-            result['generator_val_losses'].append(entry['generator_loss'])
-            result['discriminator_val_losses'].append(entry['discriminator_loss'])
-            result['discriminator_val_real_acc'].append(entry['discriminator_real_acc'])
-            result['discriminator_val_fake_acc'].append(entry['discriminator_fake_acc'])
+        for phase in ['train', 'val']:
+            for key in self.metric_keys:
+                result_key = f"{phase}_{key}s" if not key.endswith('s') else f"{phase}_{key}"
+                result[result_key] = [entry[key] for entry in self._history[phase]]
 
         return result
 
+    def _formatMetricValue(self, value: float, precision: int = 6) -> str:
+        """Format metric value for display"""
+        if abs(value) < 0.01:
+            return f"{value:.{precision}f}"
+        return f"{value:.4f}"
 
-class VAEMetrics(Metrics):
+    @abstractmethod
+    def display(self, epoch: int) -> None:
+        """Display metrics - must be implemented by subclass"""
+        pass
+
+
+class GANMetrics(BaseMetrics):
+    """Metrics tracking for GAN training"""
+
+    def __init__(self):
+        metric_keys = [
+            'generator_loss',
+            'discriminator_loss',
+            'discriminator_real_acc',
+            'discriminator_fake_acc'
+        ]
+        super().__init__(metric_keys)
+
+    def display(self, epoch: int) -> None:
+        """Display GAN-specific metrics"""
+        for phase in ['train', 'val']:
+            metrics_dict = self._current_epoch_metrics[phase]
+
+            if metrics_dict is None:
+                continue
+
+            phase_label = "Train" if phase == 'train' else "Val  "
+            print(
+                f"Epoch {epoch} [{phase_label}]: "
+                f"G loss: {metrics_dict['generator_loss']:.4f} | "
+                f"D loss: {metrics_dict['discriminator_loss']:.4f} | "
+                f"D real acc: {metrics_dict['discriminator_real_acc']:.2f} | "
+                f"D fake acc: {metrics_dict['discriminator_fake_acc']:.2f}"
+            )
+
+            if phase == 'val':
+                real_acc = metrics_dict['discriminator_real_acc']
+                fake_acc = metrics_dict['discriminator_fake_acc']
+
+                if real_acc < 0.5 and fake_acc < 0.5:
+                    print("  ⚠️  WARNING: Discriminator performing poorly on both real and fake!")
+                elif real_acc > 0.9 and fake_acc > 0.9:
+                    print("  ⚠️  WARNING: Discriminator too strong - generator may not learn!")
+
+        if self._history['val']:
+            best_gen_loss = min(entry['generator_loss'] for entry in self._history['val'])
+            print(f"  Best val generator loss: {best_gen_loss:.4f}")
+
+
+class VAEMetrics(BaseMetrics):
     """Metrics tracking for VAE training"""
 
     def __init__(self):
-        self._history = {
-            'train': [],
-            'val': []
-        }
-        self._batch_data = {
-            'train': {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'kl_divergences': []
-            },
-            'val': {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'kl_divergences': []
-            }
-        }
-        self._current_phase = 'train'
-        self._current_epoch_metrics = {
-            'train': None,
-            'val': None
-        }
-
-    def setPhase(self, phase: str) -> None:
-        """Set current phase (train/val)"""
-        if phase not in ['train', 'val']:
-            raise ValueError(f"Phase must be 'train' or 'val', got {phase}")
-        self._current_phase = phase
-
-    def accumulate(self, loss_dict: Dict[str, float]) -> None:
-        """
-        Accumulate metrics during batch processing.
-
-        Args:
-            loss_dict: Dictionary containing 'total_loss', 'reconstruction_loss', 'kl_divergence'
-        """
-        phase_data = self._batch_data[self._current_phase]
-        phase_data['total_losses'].append(loss_dict.get('total_loss', 0.0))
-        phase_data['reconstruction_losses'].append(loss_dict.get('reconstruction_loss', 0.0))
-        phase_data['kl_divergences'].append(loss_dict.get('kl_divergence', 0.0))
-
-    def finalizeEpoch(self, epoch: int) -> None:
-        """
-        Calculate and store final metrics for both train and val phases.
-
-        Args:
-            epoch: Current epoch number
-        """
-        for phase in ['train', 'val']:
-            phase_data = self._batch_data[phase]
-
-            if not phase_data['total_losses']:
-                self._current_epoch_metrics[phase] = None
-                continue
-
-            avg_total_loss = np.mean(phase_data['total_losses'])
-            avg_recon_loss = np.mean(phase_data['reconstruction_losses'])
-            avg_kl_div = np.mean(phase_data['kl_divergences'])
-
-            metrics_dict = {
-                'epoch': epoch,
-                'total_loss': avg_total_loss,
-                'reconstruction_loss': avg_recon_loss,
-                'kl_divergence': avg_kl_div
-            }
-
-            self._history[phase].append(metrics_dict)
-            self._current_epoch_metrics[phase] = metrics_dict
-
-            self._batch_data[phase] = {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'kl_divergences': []
-            }
+        metric_keys = [
+            'total_loss',
+            'reconstruction_loss',
+            'kl_divergence'
+        ]
+        super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
-        """
-        Display aggregated metrics for both train and val phases.
-
-        Args:
-            epoch: Current epoch number
-        """
+        """Display VAE-specific metrics"""
         for phase in ['train', 'val']:
             metrics_dict = self._current_epoch_metrics[phase]
 
@@ -334,165 +239,25 @@ class VAEMetrics(Metrics):
 
         if self._history['val']:
             best_total_loss = min(entry['total_loss'] for entry in self._history['val'])
-            print(f"Best val total loss: {best_total_loss:.6f}")
-
-    def getMetric(self, epoch: int, phase: str, metric_name: str) -> float:
-        """
-        Get a specific metric value for early stopping.
-
-        Args:
-            epoch: Epoch number
-            phase: 'train' or 'val'
-            metric_name: Name of metric (e.g., 'total_loss', 'reconstruction_loss', 'kl_divergence')
-
-        Returns:
-            Metric value or inf if not found
-        """
-        for entry in self._history[phase]:
-            if entry['epoch'] == epoch:
-                return entry.get(metric_name, float('inf'))
-        return float('inf')
-
-    def save(self, path: str, hyperparams_id: str, model_type: str, launch_number: int) -> None:
-        """
-        Save metrics to JSON file.
-
-        Args:
-            path: Directory path to save metrics
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (e.g., 'vae')
-            launch_number: Launch number for this training run
-        """
-        os.makedirs(path, exist_ok=True)
-
-        metrics_data = {
-            "hyperparams_id": hyperparams_id,
-            "model_type": model_type,
-            "launch_number": launch_number,
-            "train": self._history['train'],
-            "val": self._history['val']
-        }
-
-        filename = f"{model_type}_metrics_hyperparams_{hyperparams_id}_{launch_number}.json"
-        filepath = os.path.join(path, filename)
-
-        with open(filepath, 'w') as f:
-            json.dump(metrics_data, f, indent=2)
-
-    def getHistoryLists(self) -> Dict[str, List[float]]:
-        """
-        Get metrics history as lists (for backward compatibility or plotting).
-
-        Returns:
-            Dictionary containing lists of metrics
-        """
-        result = {
-            'train_total_losses': [],
-            'train_reconstruction_losses': [],
-            'train_kl_divergences': [],
-            'val_total_losses': [],
-            'val_reconstruction_losses': [],
-            'val_kl_divergences': []
-        }
-
-        for entry in self._history['train']:
-            result['train_total_losses'].append(entry['total_loss'])
-            result['train_reconstruction_losses'].append(entry['reconstruction_loss'])
-            result['train_kl_divergences'].append(entry['kl_divergence'])
-
-        for entry in self._history['val']:
-            result['val_total_losses'].append(entry['total_loss'])
-            result['val_reconstruction_losses'].append(entry['reconstruction_loss'])
-            result['val_kl_divergences'].append(entry['kl_divergence'])
-
-        return result
+            print(f"  Best val total loss: {best_total_loss:.6f}")
 
 
-class GeneratorMetrics(Metrics):
-    """Metrics tracking for Generator training"""
+class GeneratorColorizationMetrics(BaseMetrics):
+    """Metrics tracking for Generator Colorization training with colorfulness metric"""
 
     def __init__(self):
-        self._history = {
-            'train': [],
-            'val': []
-        }
-        self._batch_data = {
-            'train': {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'perceptual_losses': []
-            },
-            'val': {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'perceptual_losses': []
-            }
-        }
-        self._current_phase = 'train'
-        self._current_epoch_metrics = {
-            'train': None,
-            'val': None
-        }
-
-    def setPhase(self, phase: str) -> None:
-        """Set current phase (train/val)"""
-        if phase not in ['train', 'val']:
-            raise ValueError(f"Phase must be 'train' or 'val', got {phase}")
-        self._current_phase = phase
-
-    def accumulate(self, loss_dict: Dict[str, float]) -> None:
-        """
-        Accumulate metrics during batch processing.
-
-        Args:
-            loss_dict: Dictionary containing 'total_loss', 'reconstruction_loss', 'perceptual_loss'
-        """
-        phase_data = self._batch_data[self._current_phase]
-        phase_data['total_losses'].append(loss_dict.get('total_loss', 0.0))
-        phase_data['reconstruction_losses'].append(loss_dict.get('reconstruction_loss', 0.0))
-        phase_data['perceptual_losses'].append(loss_dict.get('perceptual_loss', 0.0))
-
-    def finalizeEpoch(self, epoch: int) -> None:
-        """
-        Calculate and store final metrics for both train and val phases.
-
-        Args:
-            epoch: Current epoch number
-        """
-        for phase in ['train', 'val']:
-            phase_data = self._batch_data[phase]
-
-            if not phase_data['total_losses']:
-                self._current_epoch_metrics[phase] = None
-                continue
-
-            avg_total_loss = np.mean(phase_data['total_losses'])
-            avg_recon_loss = np.mean(phase_data['reconstruction_losses'])
-            avg_percept_loss = np.mean(phase_data['perceptual_losses'])
-
-            metrics_dict = {
-                'epoch': epoch,
-                'total_loss': avg_total_loss,
-                'reconstruction_loss': avg_recon_loss,
-                'perceptual_loss': avg_percept_loss
-            }
-
-            self._history[phase].append(metrics_dict)
-            self._current_epoch_metrics[phase] = metrics_dict
-
-            self._batch_data[phase] = {
-                'total_losses': [],
-                'reconstruction_losses': [],
-                'perceptual_losses': []
-            }
+        metric_keys = [
+            'total_loss',
+            'reconstruction_loss',
+            'perceptual_loss',
+            'colorfulness_loss',
+            'colorfulness_recon',
+            'colorfulness_original'
+        ]
+        super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
-        """
-        Display aggregated metrics for both train and val phases.
-
-        Args:
-            epoch: Current epoch number
-        """
+        """Display colorization-specific metrics"""
         for phase in ['train', 'val']:
             metrics_dict = self._current_epoch_metrics[phase]
 
@@ -501,90 +266,18 @@ class GeneratorMetrics(Metrics):
 
             phase_label = "Train" if phase == 'train' else "Val  "
 
-            if metrics_dict['perceptual_loss'] > 0:
-                print(
-                    f"Epoch {epoch} [{phase_label}]: "
-                    f"Total loss: {metrics_dict['total_loss']:.6f} | "
-                    f"Recon loss: {metrics_dict['reconstruction_loss']:.6f} | "
-                    f"Percept loss: {metrics_dict['perceptual_loss']:.6f}"
-                )
-            else:
-                print(
-                    f"Epoch {epoch} [{phase_label}]: "
-                    f"Loss: {metrics_dict['total_loss']:.6f}"
-                )
+            loss_parts = [f"Total: {metrics_dict['total_loss']:.6f}"]
+            loss_parts.append(f"Recon: {metrics_dict['reconstruction_loss']:.6f}")
+
+            loss_parts.append(f"Percept: {metrics_dict['perceptual_loss']:.6f}")
+
+            loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
+
+            print(f"Epoch {epoch} [{phase_label}]: {' | '.join(loss_parts)}")
+
+            print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}, "
+                  f"Original: {metrics_dict['colorfulness_original']:.2f}")
 
         if self._history['val']:
             best_total_loss = min(entry['total_loss'] for entry in self._history['val'])
             print(f"  Best val loss: {best_total_loss:.6f}")
-
-    def getMetric(self, epoch: int, phase: str, metric_name: str) -> float:
-        """
-        Get a specific metric value for early stopping.
-
-        Args:
-            epoch: Epoch number
-            phase: 'train' or 'val'
-            metric_name: Name of metric (e.g., 'total_loss', 'reconstruction_loss')
-
-        Returns:
-            Metric value or inf if not found
-        """
-        for entry in self._history[phase]:
-            if entry['epoch'] == epoch:
-                return entry.get(metric_name, float('inf'))
-        return float('inf')
-
-    def save(self, path: str, hyperparams_id: str, model_type: str, launch_number: int) -> None:
-        """
-        Save metrics to JSON file.
-
-        Args:
-            path: Directory path to save metrics
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (e.g., 'generator')
-            launch_number: Launch number for this training run
-        """
-        os.makedirs(path, exist_ok=True)
-
-        metrics_data = {
-            "hyperparams_id": hyperparams_id,
-            "model_type": model_type,
-            "launch_number": launch_number,
-            "train": self._history['train'],
-            "val": self._history['val']
-        }
-
-        filename = f"{model_type}_metrics_hyperparams_{hyperparams_id}_{launch_number}.json"
-        filepath = os.path.join(path, filename)
-
-        with open(filepath, 'w') as f:
-            json.dump(metrics_data, f, indent=2)
-
-    def getHistoryLists(self) -> Dict[str, List[float]]:
-        """
-        Get metrics history as lists (for backward compatibility).
-
-        Returns:
-            Dictionary containing lists of metrics
-        """
-        result = {
-            'train_losses': [],
-            'train_reconstruction_losses': [],
-            'train_perceptual_losses': [],
-            'val_losses': [],
-            'val_reconstruction_losses': [],
-            'val_perceptual_losses': []
-        }
-
-        for entry in self._history['train']:
-            result['train_losses'].append(entry['total_loss'])
-            result['train_reconstruction_losses'].append(entry['reconstruction_loss'])
-            result['train_perceptual_losses'].append(entry['perceptual_loss'])
-
-        for entry in self._history['val']:
-            result['val_losses'].append(entry['total_loss'])
-            result['val_reconstruction_losses'].append(entry['reconstruction_loss'])
-            result['val_perceptual_losses'].append(entry['perceptual_loss'])
-
-        return result

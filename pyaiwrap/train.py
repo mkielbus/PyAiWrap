@@ -76,6 +76,7 @@ def train(
     """
     current_patience = 0
     best_val_metric = None
+    early_stopping_triggered = False
 
     os.makedirs(weights_path, exist_ok=True)
     os.makedirs(diagrams_path, exist_ok=True)
@@ -189,11 +190,12 @@ def train(
             current_patience += 1
 
         if current_patience >= max_patience:
-            print(f"Early stopping triggered after {epoch+1} epochs")
+            early_stopping_triggered = True
             break
 
     return {
         "metrics": metrics,
         "best_val_metric": best_val_metric,
-        "epochs_trained": epoch + 1
+        "epochs_trained": epoch + 1,
+        'early_stopped': early_stopping_triggered
     }

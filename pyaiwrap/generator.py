@@ -31,7 +31,13 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "PATIENCE": 15,
         "DIAGRAMS_PATH": "./diagrams",
         "VISUALIZE_EVERY": 10,
-        "GRADIENT_CLIP": 1.0
+        "GRADIENT_CLIP": 1.0,
+        "PERCEPTUAL_WEIGHT": 0.0,
+        "USE_LPIPS": False,
+        "LPIPS_NET": "alex",
+        "COLORFULNESS_WEIGHT": 0.0,
+        "COLORFULNESS_TARGET": None,
+        "TARGET_CHANNEL": "G"
     }
 
     for key, default_value in defaults.items():
