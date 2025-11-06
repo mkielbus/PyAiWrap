@@ -23,17 +23,17 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "ARCHITECTURE_ID": "0",
         "LEARNING_RATE": 0.0001,
         "GAMMA": 0.99,
-        "LATENT_DIM": 128,
-        "IMAGE_RESIZE": 64,
+        "LATENT_DIM": 1024,
+        "IMAGE_RESIZE": 256,
         "INPUT_CHANNELS": 3,
-        "KERNEL_SIZE": 3,
         "EPOCHS": 50,
         "DIAGRAMS_DATA_PATH": "./diagrams_data",
         "WEIGHTS_PATH": "./weights",
-        "KL_BETA": 1.0,  # KL divergence weight for VAE
+        "KL_BETA": 0.01,  # KL divergence weight for VAE
         "PATIENCE": 15,
         "DIAGRAMS_PATH": "./diagrams",
-        "VISUALIZE_EVERY": 10
+        "VISUALIZE_EVERY": 10,
+        "GRADIENT_CLIP": 1.0
     }
 
     for key, default_value in defaults.items():

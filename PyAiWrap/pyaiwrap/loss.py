@@ -282,19 +282,19 @@ class GANLoss:
 
         loss_discriminator = loss_real + loss_fake
 
-        if gradient_clip is not None:
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=gradient_clip)
-
-        loss_discriminator.backward()
+        if torch.is_grad_enabled():
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=gradient_clip)
+            loss_discriminator.backward()
 
         output_fake_for_gen = discriminator(fake_images)
         label_gen = torch.ones((batch_size, 1), dtype=torch.float, device=device)
         loss_generator = self.criterion(output_fake_for_gen, label_gen)
 
-        if gradient_clip is not None:
-            torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
-
-        loss_generator.backward()
+        if torch.is_grad_enabled():
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
+            loss_generator.backward()
 
         total_loss = loss_generator + loss_discriminator
 
@@ -368,10 +368,10 @@ class VAELoss:
 
         total_loss = reconstruction_loss + self.kl_weight * kl_divergence
 
-        if gradient_clip is not None:
-            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=gradient_clip)
-
-        total_loss.backward()
+        if torch.is_grad_enabled():
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=gradient_clip)
+            total_loss.backward()
 
         metrics.accumulate({
             'total_loss': total_loss.item(),

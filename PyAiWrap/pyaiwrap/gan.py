@@ -29,16 +29,14 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "GAMMA": 0.99,
         "IMAGE_RESIZE": 64,
         "IMAGE_CHANNELS": 3,
-        "ADD_IMAGE_RESIZING_ON_LAST_GEN_LAYER": False,
-        "LAST_GEN_LAYER_INDEX": 6,
-        "KERNEL_SIZE": 3,
         "WARMUP_EPOCHS": 2,
-        "EPOCHS": 2,
+        "EPOCHS": 100,
         "DIAGRAMS_DATA_PATH": "./diagrams_data",
         "WEIGHTS_PATH": "./weights",
         "PATIENCE": 15,
         "DIAGRAMS_PATH": "./diagrams",
-        "VISUALIZE_EVERY": 10
+        "VISUALIZE_EVERY": 10,
+        "GRADIENT_CLIP": 1.0
     }
 
     for key, default_value in defaults.items():
@@ -50,11 +48,12 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
 def warmupGAN(
     generator: nn.Module,
     discriminator: nn.Module,
-    real_loader: torch.utils.data.DataLoader,
+    warmup_loader: torch.utils.data.DataLoader,
     generator_optimizer: torch.optim.Optimizer,
     discriminator_optimizer: torch.optim.Optimizer,
     device: torch.device,
-    warmup_epochs: int = 1
+    warmup_epochs: int = 1,
+    gradient_clip: float = 1.0
 ):
     """
     Warmup phase:
@@ -73,17 +72,17 @@ def warmupGAN(
     # -------------------------
     for epoch in range(warmup_epochs):
         generator_losses = []
-        generator_warmup_iterator = tqdm(real_loader, desc=f"Generator warmup epoch: {epoch+1}/{warmup_epochs}",
+        generator_warmup_iterator = tqdm(warmup_loader, desc=f"Generator warmup epoch: {epoch+1}/{warmup_epochs}",
                                          position=0, leave=False)
-        for real_images, _ in generator_warmup_iterator:
-            real_images = real_images.to(device)
+        for target_images, _ in generator_warmup_iterator:
+            target_images = target_images.to(device)
 
             generator_optimizer.zero_grad()
 
-            reconstructed = generator(real_images)
-            loss_g = mae_loss_fn(reconstructed, real_images)
+            reconstructed = generator(target_images)
+            loss_g = mae_loss_fn(reconstructed, target_images)
 
-            torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=5.0)
+            torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
 
             loss_g.backward()
             generator_optimizer.step()
@@ -99,29 +98,29 @@ def warmupGAN(
     # -------------------------
     for epoch in range(warmup_epochs):
         discriminator_losses = []
-        discriminator_warmup_iterator = tqdm(real_loader, desc=f"Discriminator warmup epoch: {epoch+1}/{warmup_epochs}",
+        discriminator_warmup_iterator = tqdm(warmup_loader, desc=f"Discriminator warmup epoch: {epoch+1}/{warmup_epochs}",
                                              position=0, leave=False)
         for real_batch, _ in discriminator_warmup_iterator:
-            real_images = real_batch.to(device)
-            batch_size = real_images.size(0)
+            target_images = real_batch.to(device)
+            batch_size = target_images.size(0)
 
             real_labels = torch.ones((batch_size, 1), device=device)
             fake_labels = torch.zeros((batch_size, 1), device=device)
 
             discriminator_optimizer.zero_grad()
 
-            outputs_real = discriminator(real_images)
+            outputs_real = discriminator(target_images)
             loss_real = mae_loss_fn(outputs_real, real_labels)
 
             with torch.no_grad():
-                fake_images = generator(real_images)
+                fake_images = generator(target_images)
 
             outputs_fake = discriminator(fake_images)
             loss_fake = mae_loss_fn(outputs_fake, fake_labels)
 
             loss_d = loss_real + loss_fake
 
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=gradient_clip)
 
             loss_d.backward()
             discriminator_optimizer.step()

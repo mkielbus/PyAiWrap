@@ -30,7 +30,8 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "WEIGHTS_PATH": "./weights",
         "PATIENCE": 15,
         "DIAGRAMS_PATH": "./diagrams",
-        "VISUALIZE_EVERY": 10
+        "VISUALIZE_EVERY": 10,
+        "GRADIENT_CLIP": 1.0
     }
 
     for key, default_value in defaults.items():
