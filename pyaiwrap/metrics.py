@@ -137,8 +137,6 @@ class BaseMetrics(Metrics):
         with open(filepath, 'w') as f:
             json.dump(metrics_data, f, indent=2)
 
-        print(f"Metrics saved to: {filepath}")
-
     def getHistoryLists(self) -> Dict[str, List[float]]:
         """
         Get metrics history as lists.
@@ -150,7 +148,7 @@ class BaseMetrics(Metrics):
 
         for phase in ['train', 'val']:
             for key in self.metric_keys:
-                result_key = f"{phase}_{key}s" if not key.endswith('s') else f"{phase}_{key}"
+                result_key = f"{phase}_{key}"
                 result[result_key] = [entry[key] for entry in self._history[phase]]
 
         return result
