@@ -243,15 +243,17 @@ class VAEMetrics(BaseMetrics):
 class GeneratorColorizationMetrics(BaseMetrics):
     """Metrics tracking for Generator Colorization training with colorfulness metric"""
 
-    def __init__(self):
+    def __init__(self, use_colorfulness: bool = False):
         metric_keys = [
             'total_loss',
             'reconstruction_loss',
-            'perceptual_loss',
-            'colorfulness_loss',
-            'colorfulness_recon',
-            'colorfulness_original'
+            'perceptual_loss'
         ]
+        self._use_colorfulness = use_colorfulness
+        if self._use_colorfulness:
+            metric_keys.extend(['colorfulness_loss',
+                                'colorfulness_recon',
+                                'colorfulness_original'])
         super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
@@ -269,12 +271,14 @@ class GeneratorColorizationMetrics(BaseMetrics):
 
             loss_parts.append(f"Percept: {metrics_dict['perceptual_loss']:.6f}")
 
-            loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
+            if self._use_colorfulness:
+                loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
 
             print(f"Epoch {epoch} [{phase_label}]: {' | '.join(loss_parts)}")
 
-            print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}, "
-                  f"Original: {metrics_dict['colorfulness_original']:.2f}")
+            if self._use_colorfulness:
+                print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}, "
+                      f"Original: {metrics_dict['colorfulness_original']:.2f}")
 
         if self._history['val']:
             best_total_loss = min(entry['total_loss'] for entry in self._history['val'])

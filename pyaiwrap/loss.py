@@ -398,35 +398,26 @@ def calculateColorfulnessLoss(images: torch.Tensor) -> torch.Tensor:
     Returns:
         Mean colorfulness score for the batch
     """
-    # Scale to [0, 255] for sRGB
     images_scaled = images * 255.0
 
-    # Extract RGB channels
     R = images_scaled[:, 0, :, :]
     G = images_scaled[:, 1, :, :]
     B = images_scaled[:, 2, :, :]
 
-    # Compute opponent color space components
     rg = R - G
     yb = 0.5 * (R + G) - B
 
-    # Compute standard deviations along spatial dimensions
-    # std = sqrt(E[X^2] - E[X]^2)
     sigma_rg = torch.std(rg.reshape(rg.shape[0], -1), dim=1)
     sigma_yb = torch.std(yb.reshape(yb.shape[0], -1), dim=1)
 
-    # Compute means along spatial dimensions
     mu_rg = torch.mean(rg.reshape(rg.shape[0], -1), dim=1)
     mu_yb = torch.mean(yb.reshape(yb.shape[0], -1), dim=1)
 
-    # Compute σ_rgyb and μ_rgyb
     sigma_rgyb = torch.sqrt(sigma_rg**2 + sigma_yb**2)
     mu_rgyb = torch.sqrt(mu_rg**2 + mu_yb**2)
 
-    # Compute colorfulness metric M
     M = sigma_rgyb + 0.3 * mu_rgyb
 
-    # Return mean over batch
     return M.mean()
 
 
