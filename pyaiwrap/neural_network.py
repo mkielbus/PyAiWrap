@@ -4,8 +4,6 @@ import torch.nn as nn
 import sys
 import math
 import json
-import torchvision.utils as vutils
-import matplotlib.pyplot as plt
 
 
 class UnsupportedLayerType(Exception):
