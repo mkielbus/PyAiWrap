@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import sys
 import math
+import json
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
 
 
 class UnsupportedLayerType(Exception):
@@ -733,3 +736,92 @@ class VAE(nn.Module):
         reconstructed_images = self._decoder(reshaped_features)
 
         return reconstructed_images, latent_mean, latent_log_variance
+
+
+class ConvAttenColorizationNetwork(nn.Module):
+    def __init__(
+        self,
+        pretrained_models_config: Dict[str, Dict[str, str]],
+        architecture_path: str,
+    ):
+        super().__init__()
+
+        required_models = {"red_model", "green_model", "blue_model"}
+        if not required_models.issubset(pretrained_models_config.keys()):
+            raise ValueError(f"Required models: {required_models}")
+
+        self._pretrained_models_config = pretrained_models_config
+        self._architecture_path = architecture_path
+
+        self._pretrained_models = nn.ModuleDict()
+        self._load_pretrained_models()
+
+        self.trainable_network = self._load_trainable_network()
+
+    def _load_pretrained_models(self):
+        for model_name, model_config in self._pretrained_models_config.items():
+            try:
+                with open(model_config["architecture_path"], 'r') as f:
+                    architecture = json.load(f)
+                model = NeuralNetwork(architecture)
+                if "weights_path" in model_config and model_config["weights_path"]:
+                    state_dict = torch.load(model_config["weights_path"], map_location='cpu', weights_only=True)
+                    model.load_state_dict(state_dict)
+                for param in model.parameters():
+                    param.requires_grad = False
+                model.eval()
+                self._pretrained_models[model_name] = model
+            except Exception as e:
+                raise RuntimeError(f"Failed to load model {model_name}: {e}")
+
+    def _load_trainable_network(self):
+        with open(self._architecture_path, 'r') as f:
+            architecture = json.load(f)
+        return NeuralNetwork(architecture)
+
+    def _generate_color_channels(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, _, height, width = x.shape
+
+        red_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
+        green_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
+        blue_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
+
+        with torch.no_grad():
+            red_output = self._pretrained_models["red_model"](x)
+            if red_output.shape[1] == 3:
+                red_channel = red_output[:, 0:1, :, :]
+            elif red_output.shape[1] == 1:
+                red_channel = red_output
+            else:
+                red_channel = red_output[:, 0:1, :, :]
+
+            green_output = self._pretrained_models["green_model"](x)
+            if green_output.shape[1] == 3:
+                green_channel = green_output[:, 1:2, :, :]
+            elif green_output.shape[1] == 1:
+                green_channel = green_output
+            else:
+                green_channel = green_output[:, 0:1, :, :]
+
+            blue_output = self._pretrained_models["blue_model"](x)
+            if blue_output.shape[1] == 3:
+                blue_channel = blue_output[:, 2:3, :, :]
+            elif blue_output.shape[1] == 1:
+                blue_channel = blue_output
+            else:
+                blue_channel = blue_output[:, 0:1, :, :]
+
+        if red_channel.shape[-2:] != (height, width):
+            red_channel = nn.functional.interpolate(red_channel, size=(height, width), mode='bilinear')
+        if green_channel.shape[-2:] != (height, width):
+            green_channel = nn.functional.interpolate(green_channel, size=(height, width), mode='bilinear')
+        if blue_channel.shape[-2:] != (height, width):
+            blue_channel = nn.functional.interpolate(blue_channel, size=(height, width), mode='bilinear')
+
+        rgb_image = torch.cat([red_channel, green_channel, blue_channel], dim=1)
+        return rgb_image
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        initial_rgb = self._generate_color_channels(x)
+        final_output = self.trainable_network(initial_rgb)
+        return final_output

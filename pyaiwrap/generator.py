@@ -21,6 +21,7 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
         "HYPERPARAMS_ID": "0",
         "ARCHITECTURE_ID": "0",
+        "SUBMODULES": {},
         "LEARNING_RATE": 0.0001,
         "GAMMA": 0.99,
         "IMAGE_RESIZE": 64,
