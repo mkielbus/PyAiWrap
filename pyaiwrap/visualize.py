@@ -3,6 +3,35 @@ import os
 from torchvision.utils import make_grid, save_image
 
 
+def convert_single_channel(images, channel_type):
+    if images.shape[1] == 3:
+        return images
+
+    if channel_type == "R":
+        # [R, 0, 0]
+        return torch.cat([
+            images,  # R
+            torch.zeros_like(images),  # G
+            torch.zeros_like(images)   # B
+        ], dim=1)
+    elif channel_type == "G":
+        # [0, G, 0]
+        return torch.cat([
+            torch.zeros_like(images),  # R
+            images,  # G
+            torch.zeros_like(images)   # B
+        ], dim=1)
+    elif channel_type == "B":
+        # [0, 0, B]
+        return torch.cat([
+            torch.zeros_like(images),  # R
+            torch.zeros_like(images),  # G
+            images   # B
+        ], dim=1)
+    else:  # grayscale (all channels equal)
+        return images.repeat(1, 3, 1, 1)
+
+
 def visualizeReconstruction(original_images: torch.Tensor,
                             modified_images: torch.Tensor,
                             reconstructed_images: torch.Tensor,
@@ -11,11 +40,11 @@ def visualizeReconstruction(original_images: torch.Tensor,
                             model_type: str,
                             launch_number: str,
                             hyperparams_id: str,
-                            num_images: int = 8):
+                            num_images: int = 8,
+                            target_channel: str = "RGB"):
     """
     Create a visualization showing original, modified, and reconstructed images stacked vertically.
-    Saves directly to file without displaying.
-    Automatically converts single-channel images to 3-channel for visualization.
+    For single-channel images, converts to 3-channel with appropriate zeroing.
 
     Args:
         original_images: Tensor of shape (batch_size, C, H, W) where C can be 1 or 3
@@ -27,6 +56,7 @@ def visualizeReconstruction(original_images: torch.Tensor,
         launch_number: Launch number (for filename)
         hyperparams_id: Hyperparameters ID (for filename)
         num_images: Number of image triplets to show
+        target_channel: Target channel for single-channel models ("R", "G", "B", or "RGB")
     """
     original_images = original_images.detach().cpu()[:num_images]
     modified_images = modified_images.detach().cpu()[:num_images]
@@ -38,18 +68,13 @@ def visualizeReconstruction(original_images: torch.Tensor,
     modified_images = torch.clamp(modified_images, 0, 1)
     reconstructed_images = torch.clamp(reconstructed_images, 0, 1)
 
-    # Convert single-channel to 3-channel if needed
-    if original_images.shape[1] == 1:
-        original_images = original_images.repeat(1, 3, 1, 1)
-    if modified_images.shape[1] == 1:
-        modified_images = modified_images.repeat(1, 3, 1, 1)
-    if reconstructed_images.shape[1] == 1:
-        reconstructed_images = reconstructed_images.repeat(1, 3, 1, 1)
+    original_3ch = convert_single_channel(original_images, target_channel)
+    modified_3ch = convert_single_channel(modified_images, "RGB")
+    reconstructed_3ch = convert_single_channel(reconstructed_images, target_channel)
 
-    # Stack vertically: original on top, modified middle, reconstructed bottom
-    comparison = torch.cat([original_images, modified_images, reconstructed_images], dim=0)
+    # Stack vertically: top, modified, reconstructed
+    comparison = torch.cat([original_3ch, modified_3ch, reconstructed_3ch], dim=0)
 
-    # Make grid with num_images per row
     grid = make_grid(comparison, nrow=actual_num_images, padding=2, normalize=False)
 
     os.makedirs(save_path, exist_ok=True)

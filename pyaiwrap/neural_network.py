@@ -4,6 +4,7 @@ import torch.nn as nn
 import sys
 import math
 import json
+from .utils import distancePositionalEncoding
 
 
 class UnsupportedLayerType(Exception):
@@ -372,6 +373,9 @@ class ImageTransformerBlock(nn.Module):
         # Flatten: [B, C, H, W] -> [B, H*W, C]
         x_flat = x.view(b, c, h * w).transpose(1, 2)
 
+        pos_encoding = distancePositionalEncoding(h, w, c, x.device)
+        x_flat = x_flat + pos_encoding
+
         # Apply transformer
         x_flat = self.transformer(x_flat, context_key=context_key, context_value=context_value)
 
@@ -572,12 +576,14 @@ class ImageTransformerNet(nn.Module):
         x_flat = x.view(b, c, h * w)  # [B, C, H*W]
         x_flat = x_flat.transpose(1, 2)  # [B, H*W, C]
 
-        # Apply transformer
+        pos_encoding = distancePositionalEncoding(h, w, c, x.device)
+        x_flat = x_flat + pos_encoding
+
         # Input: [B, H*W, C]
         # Output: [B, H*W, C] (after softmax over channel dimension)
         x_flat = self.transformer_net(encoder_input=x_flat)
 
-        # Unflatten back to spatial: [B, H*W, C] -> [B, C, H, W]
+        # [B, H*W, C] -> [B, C, H, W]
         x_flat = x_flat.transpose(1, 2)  # [B, C, H*W]
         x = x_flat.view(b, c, h, w)  # [B, C, H, W]
 
@@ -754,7 +760,7 @@ class ConvAttenColorizationNetwork(nn.Module):
         self._pretrained_models = nn.ModuleDict()
         self._load_pretrained_models()
 
-        self.trainable_network = self._load_trainable_network()
+        self._trainable_network = self._load_trainable_network()
 
     def _load_pretrained_models(self):
         for model_name, model_config in self._pretrained_models_config.items():
@@ -780,34 +786,10 @@ class ConvAttenColorizationNetwork(nn.Module):
     def _generate_color_channels(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, _, height, width = x.shape
 
-        red_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
-        green_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
-        blue_channel = torch.zeros(batch_size, 1, height, width, device=x.device)
-
         with torch.no_grad():
-            red_output = self._pretrained_models["red_model"](x)
-            if red_output.shape[1] == 3:
-                red_channel = red_output[:, 0:1, :, :]
-            elif red_output.shape[1] == 1:
-                red_channel = red_output
-            else:
-                red_channel = red_output[:, 0:1, :, :]
-
-            green_output = self._pretrained_models["green_model"](x)
-            if green_output.shape[1] == 3:
-                green_channel = green_output[:, 1:2, :, :]
-            elif green_output.shape[1] == 1:
-                green_channel = green_output
-            else:
-                green_channel = green_output[:, 0:1, :, :]
-
-            blue_output = self._pretrained_models["blue_model"](x)
-            if blue_output.shape[1] == 3:
-                blue_channel = blue_output[:, 2:3, :, :]
-            elif blue_output.shape[1] == 1:
-                blue_channel = blue_output
-            else:
-                blue_channel = blue_output[:, 0:1, :, :]
+            red_channel = self._pretrained_models["red_model"](x)    # [B, 1, H, W]
+            green_channel = self._pretrained_models["green_model"](x)  # [B, 1, H, W]
+            blue_channel = self._pretrained_models["blue_model"](x)   # [B, 1, H, W]
 
         if red_channel.shape[-2:] != (height, width):
             red_channel = nn.functional.interpolate(red_channel, size=(height, width), mode='bilinear')
@@ -816,10 +798,10 @@ class ConvAttenColorizationNetwork(nn.Module):
         if blue_channel.shape[-2:] != (height, width):
             blue_channel = nn.functional.interpolate(blue_channel, size=(height, width), mode='bilinear')
 
-        rgb_image = torch.cat([red_channel, green_channel, blue_channel], dim=1)
+        rgb_image = torch.cat([red_channel, green_channel, blue_channel], dim=1)  # [B, 3, H, W]
         return rgb_image
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         initial_rgb = self._generate_color_channels(x)
-        final_output = self.trainable_network(initial_rgb)
+        final_output = self._trainable_network(initial_rgb)
         return final_output

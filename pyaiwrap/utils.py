@@ -193,3 +193,26 @@ def setDeterministic(enable: bool = True) -> None:
         torch.backends.cudnn.deterministic = enable
         torch.backends.cudnn.benchmark = not enable
     print(f"Deterministic mode {'enabled' if enable else 'disabled'}")
+
+
+def distancePositionalEncoding(height: int, width: int, d_model: int, device: torch.device):
+    """2D positional encoding based on distance from center"""
+    y_coords = torch.linspace(-1, 1, height, device=device)
+    x_coords = torch.linspace(-1, 1, width, device=device)
+    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
+
+    distance = torch.sqrt(y_grid**2 + x_grid**2)  # [height, width]
+    angle = torch.atan2(y_grid, x_grid)  # [height, width]
+
+    distance_flat = distance.reshape(-1, 1)  # [height*width, 1]
+    angle_flat = angle.reshape(-1, 1)        # [height*width, 1]
+
+    dimensions = torch.arange(d_model, device=device).float().unsqueeze(0)  # [1, d_model]
+
+    encoding = torch.zeros(height * width, d_model, device=device)
+
+    encoding[:, 0::2] = torch.sin(distance_flat * dimensions[:, 0::2] * torch.pi)
+
+    encoding[:, 1::2] = torch.cos(angle_flat * dimensions[:, 1::2] * torch.pi)
+
+    return encoding.unsqueeze(0)  # [1, height*width, d_model]
