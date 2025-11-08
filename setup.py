@@ -21,7 +21,7 @@ setup(
     author_email="mateusz.kielbus.mk@gmail.com",
     url="https://github.com/mkielbus/AI-in-Computer-Graphics-Labs",
     packages=find_packages(),
-    python_requires=">=3.12",
+    python_requires=">=3.10",
     install_requires=read_dependencies("requirements.txt"),
     classifiers=[
         "Programming Language :: Python :: 3",
