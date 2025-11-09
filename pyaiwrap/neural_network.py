@@ -809,7 +809,7 @@ class ConvAttenColorizationNetwork(nn.Module):
     def _load_trainable_network(self):
         with open(self._architecture_path, 'r') as f:
             architecture = json.load(f)
-        return NeuralNetwork(architecture)
+        return UNetWithSkipConnections(architecture)
 
     def _generate_color_channels(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, _, height, width = x.shape
@@ -820,11 +820,11 @@ class ConvAttenColorizationNetwork(nn.Module):
             blue_channel = self._pretrained_models["blue_model"](x)   # [B, 1, H, W]
 
         if red_channel.shape[-2:] != (height, width):
-            red_channel = nn.functional.interpolate(red_channel, size=(height, width), mode='bilinear')
+            red_channel = nn.functional.interpolate(red_channel, size=(height, width), mode='bicubic')
         if green_channel.shape[-2:] != (height, width):
-            green_channel = nn.functional.interpolate(green_channel, size=(height, width), mode='bilinear')
+            green_channel = nn.functional.interpolate(green_channel, size=(height, width), mode='bicubic')
         if blue_channel.shape[-2:] != (height, width):
-            blue_channel = nn.functional.interpolate(blue_channel, size=(height, width), mode='bilinear')
+            blue_channel = nn.functional.interpolate(blue_channel, size=(height, width), mode='bicubic')
 
         rgb_image = torch.cat([red_channel, green_channel, blue_channel], dim=1)  # [B, 3, H, W]
         return rgb_image
@@ -833,3 +833,139 @@ class ConvAttenColorizationNetwork(nn.Module):
         initial_rgb = self._generate_color_channels(x)
         final_output = self._trainable_network(initial_rgb)
         return final_output
+
+
+class UNetEncoderBlock(nn.Module):
+    """UNet encoder block with optional downsampling"""
+
+    def __init__(self, in_channels: int, out_channels: int, downsample: bool = True, block_name: str = ""):
+        super().__init__()
+        self._block_name = block_name
+
+        layers = []
+        layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
+        layers.append(nn.InstanceNorm2d(out_channels))
+        layers.append(nn.GELU())
+
+        layers.append(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1))
+        layers.append(nn.InstanceNorm2d(out_channels))
+        layers.append(nn.GELU())
+
+        self._conv_block = nn.Sequential(*layers)
+
+        if downsample:
+            self._downsample = nn.Sequential(
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1),
+                nn.InstanceNorm2d(out_channels),
+                nn.GELU()
+            )
+        else:
+            self._downsample = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self._conv_block(x)
+
+        self._skip_features = features
+
+        if self._downsample is not None:
+            return self._downsample(features)
+        return features
+
+
+class UNetDecoderBlock(nn.Module):
+    """UNet decoder block with summed skip connections"""
+
+    def __init__(self, in_channels: int, out_channels: int, upsample: bool = True, 
+                 skip_connection: str = "", block_name: str = ""):
+        super().__init__()
+        self._skip_connection_name = skip_connection
+        self._block_name = block_name
+
+        if upsample:
+            self._upsample = nn.Sequential(
+                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+                nn.InstanceNorm2d(out_channels),
+                nn.GELU()
+            )
+        else:
+            self._upsample = None
+
+        self._conv_block = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(out_channels),
+            nn.GELU()
+        )
+
+    def forward(self, x: torch.Tensor, encoder_features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if self._upsample is not None:
+            x = self._upsample(x)
+
+        if self._skip_connection_name and self._skip_connection_name in encoder_features:
+            skip_features = encoder_features[self._skip_connection_name]
+
+            if skip_features.shape[-2:] != x.shape[-2:]:
+                skip_features = F.interpolate(
+                    skip_features, size=x.shape[-2:], mode='bicubic', align_corners=False
+                )
+            x = x + skip_features
+        return self._conv_block(x)
+
+
+class UNetBottleneck(nn.Module):
+    """Bottleneck layer at the bottom of UNet"""
+
+    def __init__(self, channels: int, bottleneck_channels: int = 512):
+        super().__init__()
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(channels, bottleneck_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(bottleneck_channels),
+            nn.GELU(),
+            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(bottleneck_channels),
+            nn.GELU()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.bottleneck(x)
+
+
+class UNetWithSkipConnections(nn.Module):
+    """Complete UNet with summed skip connections"""
+
+    def __init__(self, layers_config: List[Dict[str, Any]]):
+        super().__init__()
+        self._layers = nn.ModuleList()
+        self._encoder_blocks = {}
+        self._decoder_blocks = {}
+
+        for layer_config in layers_config:
+            layer_type = layer_config["type"]
+            params = layer_config["params"]
+
+            if layer_type == "UNetEncoderBlock":
+                block_name = params.get("block_name", f"enc_{len(self._encoder_blocks)}")
+                layer = UNetEncoderBlock(**params)
+                self._encoder_blocks[block_name] = layer
+                self._layers.append(layer)
+            elif layer_type == "UNetDecoderBlock":
+                block_name = params.get("block_name", f"dec_{len(self._decoder_blocks)}")
+                layer = UNetDecoderBlock(**params)
+                self._decoder_blocks[block_name] = layer
+                self._layers.append(layer)
+            else:
+                self._layers.append(NeuralNetworkLayer(layer_config))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        encoder_features = {}
+        for layer in self._layers:
+            if isinstance(layer, UNetEncoderBlock):
+                x = layer(x)
+                encoder_features[layer._block_name] = layer._skip_features
+            elif isinstance(layer, UNetDecoderBlock):
+                x = layer(x, encoder_features)
+            else:
+                x = layer(x)
+        return x
