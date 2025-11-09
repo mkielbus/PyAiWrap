@@ -598,7 +598,7 @@ class TransformerNet(nn.Module):
             self.decoder_layers.append(decoder_layer)
 
         self.output_projection = nn.Linear(dim, self.output_dim)
-        self.softmax = nn.Softmax(dim=-1)
+        self._output = nn.Identity()
 
     def forward(self, encoder_input: torch.Tensor) -> torch.Tensor:
         """
@@ -642,7 +642,7 @@ class TransformerNet(nn.Module):
         # ===== OUTPUT PROJECTION =====
         output = self.output_projection(decoder_output)  # [B, N_dec, output_dim]
 
-        output = self.softmax(output)  # [B, N_dec, output_dim]
+        output = self._output(output)  # [B, N_dec, output_dim]
 
         return output
 
