@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Callable, Optional
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import sys
 import math
 import json
@@ -89,6 +90,33 @@ class UpsamplingBlock(nn.Module):
         activated_tensor = self.activation(normalized_tensor)
         output_tensor = self.residual_blocks(activated_tensor)
         return output_tensor
+
+
+class ResizeCustom(nn.Module):
+    """
+    Custom resize layer that resizes input to (new_size x new_size)
+
+    Args:
+        new_size (int): Target size for both height and width
+        mode (str): Interpolation mode ('bilinear', 'nearest', 'bicubic')
+        align_corners (bool): Whether to align corners (for bilinear/bicubic)
+    """
+    def __init__(self, new_size=156, mode='bicubic', align_corners=False):
+        super().__init__()
+        self._new_size = new_size
+        self._mode = mode
+        self._align_corners = align_corners if mode in ['bilinear', 'bicubic'] else None
+
+    def forward(self, x):
+        return F.interpolate(
+            x,
+            size=(self._new_size, self._new_size),
+            mode=self._mode,
+            align_corners=self._align_corners
+        )
+
+    def extra_repr(self):
+        return f'new_size={self._new_size}, mode={self._mode}, align_corners={self._align_corners}'
 
 
 class MultiHeadAttention(nn.Module):
