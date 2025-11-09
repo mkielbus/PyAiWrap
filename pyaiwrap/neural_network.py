@@ -166,8 +166,7 @@ class MultiHeadAttention(nn.Module):
         self.attention_dropout = nn.Dropout(dropout)
         self.output_dropout = nn.Dropout(dropout)
 
-        # Cache for causal mask
-        self.register_buffer('causal_mask_cache', None)
+        self.causal_mask_cache = None
 
     def _get_causal_mask(self, query_len: int, key_len: int, device: torch.device) -> torch.Tensor:
         """
@@ -181,11 +180,6 @@ class MultiHeadAttention(nn.Module):
         Returns:
             mask: [query_len, key_len] where True = masked out
         """
-        # Check cache
-        if (self.causal_mask_cache is not None and
-            self.causal_mask_cache.shape[0] >= query_len and
-                self.causal_mask_cache.shape[1] >= key_len):
-            return self.causal_mask_cache[:query_len, :key_len]
 
         # Create upper triangular matrix
         mask = torch.triu(
