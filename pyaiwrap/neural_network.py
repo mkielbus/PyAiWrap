@@ -489,7 +489,8 @@ class ImageTransformerBlock(nn.Module):
 
         return x_out
 
-    def _forward_pixels(self, x: torch.Tensor, context_key: Optional[torch.Tensor], context_value: Optional[torch.Tensor]) -> torch.Tensor:
+    def _forward_pixels(self, x: torch.Tensor, context_key: Optional[torch.Tensor],
+                        context_value: Optional[torch.Tensor]) -> torch.Tensor:
         """Original pixel-wise processing with your positional encoding"""
         b, c, h, w = x.shape
 
@@ -683,6 +684,7 @@ class ImageTransformerNet(nn.Module):
     """
     def __init__(self,
                  channels: int,
+                 embed_channels: int = 1,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
@@ -702,22 +704,27 @@ class ImageTransformerNet(nn.Module):
         super().__init__()
 
         self.channels = channels
+        self._embed_channels = embed_channels
 
         self.use_patches = kwargs.pop('use_patches', False)
         self.patch_size = kwargs.pop('patch_size', 16)
 
         if self.use_patches:
-            self.patch_embed = PatchEmbed(patch_size=self.patch_size, in_channels=channels, embed_dim=channels)
-            self.patch_upsample = PatchUpsample(patch_size=self.patch_size, embed_dim=channels, out_channels=channels)
+            self.patch_embed = PatchEmbed(patch_size=self.patch_size, in_channels=channels, embed_dim=embed_channels)
+            self.patch_upsample = PatchUpsample(patch_size=self.patch_size, embed_dim=embed_channels,
+                                                out_channels=channels)
+        else:
+            self._pixel_embed = nn.Linear(channels, embed_channels)
+            self._pixel_unembed = nn.Linear(embed_channels, channels)
 
         # Output_dim = channels (preserving shape)
         self._transformer_net = TransformerNet(
-            dim=channels,
+            dim=embed_channels,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             num_layers=num_layers,
-            output_dim=channels,  # Output same number of channels
+            output_dim=embed_channels,  # Output same number of channels
             use_decoder_masking=use_decoder_masking,
             only_use_encoder=only_use_encoder
         )
@@ -748,7 +755,7 @@ class ImageTransformerNet(nn.Module):
         patch_w = w // self.patch_size
         num_patches = patch_h * patch_w
 
-        pos_encoding = distancePositionalEncoding(patch_h, patch_w, c, x.device)
+        pos_encoding = distancePositionalEncoding(patch_h, patch_w, self._embed_channels, x.device)
         x_patches = x_patches + pos_encoding
 
         x_patches = self._transformer_net(encoder_input=x_patches,
@@ -767,8 +774,9 @@ class ImageTransformerNet(nn.Module):
         # [B, C, H, W] -> [B, H*W, C]
         x_flat = x.view(b, c, h * w)  # [B, C, H*W]
         x_flat = x_flat.transpose(1, 2)  # [B, H*W, C]
+        x_flat = self._pixel_embed(x_flat)
 
-        pos_encoding = distancePositionalEncoding(h, w, c, x.device)
+        pos_encoding = distancePositionalEncoding(h, w, self._embed_channels, x.device)
         x_flat = x_flat + pos_encoding
 
         # Input: [B, H*W, C]
@@ -777,6 +785,7 @@ class ImageTransformerNet(nn.Module):
                                        decoder_input=x_flat,  # Teacher forcing
                                        seq_length=h * w)
 
+        x_flat = self._pixel_unembed(x_flat)  # [B, H*W, channels]
         # [B, H*W, C] -> [B, C, H, W]
         x_flat = x_flat.transpose(1, 2)  # [B, C, H*W]
         x_out = x_flat.view(b, c, h, w)  # [B, C, H, W]
