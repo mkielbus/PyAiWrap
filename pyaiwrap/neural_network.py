@@ -940,7 +940,7 @@ class ConvAttenColorizationNetwork(nn.Module):
     def __init__(
         self,
         pretrained_models_config: Dict[str, Dict[str, str]],
-        architecture_path: str,
+        trainable_network: nn.Module,  # Generic trainable network
     ):
         super().__init__()
 
@@ -949,12 +949,11 @@ class ConvAttenColorizationNetwork(nn.Module):
             raise ValueError(f"Required models: {required_models}")
 
         self._pretrained_models_config = pretrained_models_config
-        self._architecture_path = architecture_path
 
         self._pretrained_models = nn.ModuleDict()
         self._load_pretrained_models()
 
-        self._trainable_network = self._load_trainable_network()
+        self._trainable_network = trainable_network
 
     def _load_pretrained_models(self):
         for model_name, model_config in self._pretrained_models_config.items():
@@ -971,11 +970,6 @@ class ConvAttenColorizationNetwork(nn.Module):
                 self._pretrained_models[model_name] = model
             except Exception as e:
                 raise RuntimeError(f"Failed to load model {model_name}: {e}")
-
-    def _load_trainable_network(self):
-        with open(self._architecture_path, 'r') as f:
-            architecture = json.load(f)
-        return UNetWithSkipConnections(architecture)
 
     def _generate_color_channels(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, _, height, width = x.shape
