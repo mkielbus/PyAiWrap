@@ -519,8 +519,8 @@ class TransformerNet(nn.Module):
     - Linear projection + Softmax
 
     Follows "Attention is All You Need" architecture:
-    - Queries come from previous decoder layer
-    - Keys and values come from encoder output (memory)
+    - Encoder processes input sequence
+    - Decoder processes target sequence (autoregressive) with cross-attention to encoder
     """
     def __init__(self,
                  dim: int,
@@ -528,7 +528,8 @@ class TransformerNet(nn.Module):
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
                  num_layers: int = 6,
-                 output_dim: Optional[int] = None):
+                 output_dim: Optional[int] = None,
+                 use_decoder_masking: bool = True):
         """
         Args:
             dim: Dimension of features throughout the network
@@ -569,7 +570,7 @@ class TransformerNet(nn.Module):
                     embed_dim=dim,
                     num_heads=num_heads,
                     dropout=dropout,
-                    use_causal_mask=True  # Causal mask for autoregressive
+                    use_causal_mask=use_decoder_masking  # Causal mask - only for autoregressive!
                 ),
                 'norm1': nn.LayerNorm(dim),
 
@@ -597,35 +598,57 @@ class TransformerNet(nn.Module):
             })
             self.decoder_layers.append(decoder_layer)
 
+        # Learnable decoder start token
+        self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
+
         self.output_projection = nn.Linear(dim, self.output_dim)
         self._output = nn.Identity()
 
-    def forward(self, encoder_input: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                encoder_input: torch.Tensor,
+                decoder_input: Optional[torch.Tensor] = None,
+                seq_length: Optional[int] = None) -> torch.Tensor:
         """
         Forward pass through encoder-decoder transformer.
 
         Args:
-            encoder_input: [B, N_enc, D] - input to encoder
+            encoder_input: [B, N_enc, D] - input to encoder (with positional encoding)
+            decoder_input: [B, N_dec, D] - optional decoder input (for teacher forcing)
+            seq_length: int - if decoder_input not provided, length of sequence to generate
 
         Returns:
-            output: [B, N_enc, output_dim] - same sequence length as encoder_input
-                   After softmax, each position has probability distribution
+            output: [B, N_dec, output_dim] - output sequence
         """
+        batch_size = encoder_input.shape[0]
 
-        # ===== ENCODER: N layers =====
+        # encoder: N layers
         encoder_output = encoder_input
         for encoder_layer in self.encoder_layers:
             encoder_output = encoder_layer(encoder_output)
+        # encoder_output: [B, N_enc, D] - "memory" for cross-attention
 
-        # encoder_output: [B, N_enc, D]
+        # decoder: prepare input
+        if decoder_input is not None:
+            # Teacher forcing: use provided decoder input
+            decoder_output = decoder_input
+        else:
+            # start with token that should be learned and repeat for sequence length
+            if seq_length is None:
+                seq_length = encoder_input.shape[1]  # Same length as encoder by default
+
+            decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
+
+            pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
+            decoder_output = decoder_output + pos_encoding
 
         # ===== DECODER: N layers =====
-        decoder_output = encoder_output
         for decoder_layer in self.decoder_layers:
+            # 1. Self-attention (with optional causal mask for autoregressive)
             self_attn_out = decoder_layer['self_attention'](query=decoder_output)
             decoder_output = decoder_output + self_attn_out
             decoder_output = decoder_layer['norm1'](decoder_output)
 
+            # 2. Cross-attention to encoder output
             cross_attn_out = decoder_layer['cross_attention'](
                 query=decoder_output,      # Queries from decoder
                 key=encoder_output,        # Keys from encoder memory
@@ -641,7 +664,6 @@ class TransformerNet(nn.Module):
 
         # ===== OUTPUT PROJECTION =====
         output = self.output_projection(decoder_output)  # [B, N_dec, output_dim]
-
         output = self._output(output)  # [B, N_dec, output_dim]
 
         return output
@@ -662,6 +684,7 @@ class ImageTransformerNet(nn.Module):
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
                  num_layers: int = 6,
+                 use_decoder_masking: bool = False,
                  **kwargs):  # Accept additional kwargs for backward compatibility
         """
         Args:
@@ -690,7 +713,8 @@ class ImageTransformerNet(nn.Module):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             num_layers=num_layers,
-            output_dim=channels  # Output same number of channels
+            output_dim=channels,  # Output same number of channels
+            use_decoder_masking=use_decoder_masking
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -717,11 +741,14 @@ class ImageTransformerNet(nn.Module):
 
         patch_h = h // self.patch_size
         patch_w = w // self.patch_size
+        num_patches = patch_h * patch_w
 
         pos_encoding = distancePositionalEncoding(patch_h, patch_w, c, x.device)
         x_patches = x_patches + pos_encoding
 
-        x_patches = self._transformer_net(encoder_input=x_patches)
+        x_patches = self._transformer_net(encoder_input=x_patches,
+                                          decoder_input=x_patches,  # Teacher forcing
+                                          seq_length=num_patches)
 
         # [B, num_patches, C] -> [B, C, H, W]
         x_out = self.patch_upsample(x_patches)
@@ -741,7 +768,9 @@ class ImageTransformerNet(nn.Module):
 
         # Input: [B, H*W, C]
         # Output: [B, H*W, C]
-        x_flat = self._transformer_net(encoder_input=x_flat)
+        x_flat = self._transformer_net(encoder_input=x_flat,
+                                       decoder_input=x_flat,  # Teacher forcing
+                                       seq_length=h * w)
 
         # [B, H*W, C] -> [B, C, H, W]
         x_flat = x_flat.transpose(1, 2)  # [B, C, H*W]
