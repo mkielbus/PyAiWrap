@@ -529,6 +529,7 @@ class TransformerNet(nn.Module):
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  output_dim: Optional[int] = None,
+                 only_use_encoder: bool = False,
                  use_decoder_masking: bool = True):
         """
         Args:
@@ -544,6 +545,7 @@ class TransformerNet(nn.Module):
         self.dim = dim
         self.num_layers = num_layers
         self.output_dim = output_dim if output_dim is not None else dim
+        self._only_use_encoder = only_use_encoder
 
         # ===== ENCODER: N layers of self-attention =====
         self.encoder_layers = nn.ModuleList([
@@ -559,47 +561,48 @@ class TransformerNet(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # ===== DECODER: N custom layers =====
-        self.decoder_layers = nn.ModuleList()
-        for _ in range(num_layers):
-            decoder_layer = nn.ModuleDict({
-                'self_attention': MultiHeadAttention(
-                    query_dim=dim,
-                    key_dim=None,
-                    value_dim=None,
-                    embed_dim=dim,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                    use_causal_mask=use_decoder_masking  # Causal mask - only for autoregressive!
-                ),
-                'norm1': nn.LayerNorm(dim),
+        if not only_use_encoder:
+            # ===== DECODER: N custom layers =====
+            self.decoder_layers = nn.ModuleList()
+            for _ in range(num_layers):
+                decoder_layer = nn.ModuleDict({
+                    'self_attention': MultiHeadAttention(
+                        query_dim=dim,
+                        key_dim=None,
+                        value_dim=None,
+                        embed_dim=dim,
+                        num_heads=num_heads,
+                        dropout=dropout,
+                        use_causal_mask=use_decoder_masking  # Causal mask - only for autoregressive!
+                    ),
+                    'norm1': nn.LayerNorm(dim),
 
-                # Queries from decoder, Keys and Values from encoder output
-                'cross_attention': MultiHeadAttention(
-                    query_dim=dim,
-                    key_dim=dim,  # From encoder
-                    value_dim=dim,  # From encoder
-                    embed_dim=dim,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                    use_causal_mask=False
-                ),
-                'norm2': nn.LayerNorm(dim),
+                    # Queries from decoder, Keys and Values from encoder output
+                    'cross_attention': MultiHeadAttention(
+                        query_dim=dim,
+                        key_dim=dim,  # From encoder
+                        value_dim=dim,  # From encoder
+                        embed_dim=dim,
+                        num_heads=num_heads,
+                        dropout=dropout,
+                        use_causal_mask=False
+                    ),
+                    'norm2': nn.LayerNorm(dim),
 
-                # Position-wise Feed-Forward Network (MLP)
-                'mlp': nn.Sequential(
-                    nn.Linear(dim, dim * mlp_ratio),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(dim * mlp_ratio, dim),
-                    nn.Dropout(dropout)
-                ),
-                'norm3': nn.LayerNorm(dim)
-            })
-            self.decoder_layers.append(decoder_layer)
+                    # Position-wise Feed-Forward Network (MLP)
+                    'mlp': nn.Sequential(
+                        nn.Linear(dim, dim * mlp_ratio),
+                        nn.GELU(),
+                        nn.Dropout(dropout),
+                        nn.Linear(dim * mlp_ratio, dim),
+                        nn.Dropout(dropout)
+                    ),
+                    'norm3': nn.LayerNorm(dim)
+                })
+                self.decoder_layers.append(decoder_layer)
 
-        # Learnable decoder start token
-        self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
+            # Learnable decoder start token
+            self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
 
         self.output_projection = nn.Linear(dim, self.output_dim)
         self._output = nn.Identity()
@@ -626,45 +629,47 @@ class TransformerNet(nn.Module):
         for encoder_layer in self.encoder_layers:
             encoder_output = encoder_layer(encoder_output)
         # encoder_output: [B, N_enc, D] - "memory" for cross-attention
+        if not self._only_use_encoder:
+            # decoder: prepare input
+            if decoder_input is not None:
+                # Teacher forcing: use provided decoder input
+                decoder_output = decoder_input
+            else:
+                # start with token that should be learned and repeat for sequence length
+                if seq_length is None:
+                    seq_length = encoder_input.shape[1]  # Same length as encoder by default
 
-        # decoder: prepare input
-        if decoder_input is not None:
-            # Teacher forcing: use provided decoder input
-            decoder_output = decoder_input
-        else:
-            # start with token that should be learned and repeat for sequence length
-            if seq_length is None:
-                seq_length = encoder_input.shape[1]  # Same length as encoder by default
+                decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
 
-            decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
+                pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
+                decoder_output = decoder_output + pos_encoding
 
-            pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
-            decoder_output = decoder_output + pos_encoding
+            # ===== DECODER: N layers =====
+            for decoder_layer in self.decoder_layers:
+                # 1. Self-attention (with optional causal mask for autoregressive)
+                self_attn_out = decoder_layer['self_attention'](query=decoder_output)
+                decoder_output = decoder_output + self_attn_out
+                decoder_output = decoder_layer['norm1'](decoder_output)
 
-        # ===== DECODER: N layers =====
-        for decoder_layer in self.decoder_layers:
-            # 1. Self-attention (with optional causal mask for autoregressive)
-            self_attn_out = decoder_layer['self_attention'](query=decoder_output)
-            decoder_output = decoder_output + self_attn_out
-            decoder_output = decoder_layer['norm1'](decoder_output)
+                # 2. Cross-attention to encoder output
+                cross_attn_out = decoder_layer['cross_attention'](
+                    query=decoder_output,      # Queries from decoder
+                    key=encoder_output,        # Keys from encoder memory
+                    value=encoder_output       # Values from encoder memory
+                )
+                decoder_output = decoder_output + cross_attn_out
+                decoder_output = decoder_layer['norm2'](decoder_output)
 
-            # 2. Cross-attention to encoder output
-            cross_attn_out = decoder_layer['cross_attention'](
-                query=decoder_output,      # Queries from decoder
-                key=encoder_output,        # Keys from encoder memory
-                value=encoder_output       # Values from encoder memory
-            )
-            decoder_output = decoder_output + cross_attn_out
-            decoder_output = decoder_layer['norm2'](decoder_output)
-
-            # 3. Position-wise Feed-Forward (MLP)
-            mlp_out = decoder_layer['mlp'](decoder_output)
-            decoder_output = decoder_output + mlp_out
-            decoder_output = decoder_layer['norm3'](decoder_output)
+                # 3. Position-wise Feed-Forward (MLP)
+                mlp_out = decoder_layer['mlp'](decoder_output)
+                decoder_output = decoder_output + mlp_out
+                decoder_output = decoder_layer['norm3'](decoder_output)
 
         # ===== OUTPUT PROJECTION =====
-        output = self.output_projection(decoder_output)  # [B, N_dec, output_dim]
-        output = self._output(output)  # [B, N_dec, output_dim]
+        if self._only_use_encoder:
+            decoder_output = encoder_output
+        output = self.output_projection(decoder_output)  # [B, N_dec or N_enc, output_dim]
+        output = self._output(output)  # [B, N_dec or N_enc, output_dim]
 
         return output
 
@@ -706,7 +711,7 @@ class ImageTransformerNet(nn.Module):
             self.patch_embed = PatchEmbed(patch_size=self.patch_size, in_channels=channels, embed_dim=channels)
             self.patch_upsample = PatchUpsample(patch_size=self.patch_size, embed_dim=channels, out_channels=channels)
 
-        # Output_dim = channels (to preserve shape)
+        # Output_dim = channels (preserving shape)
         self._transformer_net = TransformerNet(
             dim=channels,
             num_heads=num_heads,
