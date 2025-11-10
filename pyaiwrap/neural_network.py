@@ -217,8 +217,6 @@ class MultiHeadAttention(nn.Module):
         key_len = key.size(1)
         value_len = value.size(1)
 
-        # Note: In standard attention, key_len should equal value_len
-        # but we support them being passed separately
         assert key_len == value_len, "Key and value must have same sequence length"
 
         # Project to Q, K, V
@@ -690,6 +688,7 @@ class ImageTransformerNet(nn.Module):
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  use_decoder_masking: bool = False,
+                 only_use_encoder: bool = True,
                  **kwargs):  # Accept additional kwargs for backward compatibility
         """
         Args:
@@ -719,7 +718,8 @@ class ImageTransformerNet(nn.Module):
             dropout=dropout,
             num_layers=num_layers,
             output_dim=channels,  # Output same number of channels
-            use_decoder_masking=use_decoder_masking
+            use_decoder_masking=use_decoder_masking,
+            only_use_encoder=only_use_encoder
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
