@@ -1053,11 +1053,13 @@ class UNetDecoderBlock(nn.Module):
                 nn.InstanceNorm2d(out_channels),
                 nn.GELU()
             )
+            conv_input_channels = out_channels
         else:
             self._upsample = None
+            conv_input_channels = in_channels
 
         self._conv_block = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(conv_input_channels, out_channels, kernel_size=3, padding=1),
             nn.InstanceNorm2d(out_channels),
             nn.GELU(),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
@@ -1077,6 +1079,7 @@ class UNetDecoderBlock(nn.Module):
                     skip_features, size=x.shape[-2:], mode='bicubic', align_corners=False
                 )
             x = x + skip_features
+
         return self._conv_block(x)
 
 
