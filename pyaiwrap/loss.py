@@ -525,8 +525,8 @@ class GeneratorColorizationLoss:
         metrics.accumulate({
             'total_loss': total_loss.item(),
             'reconstruction_loss': reconstruction_loss.item(),
-            'perceptual_loss': perceptual_loss.item(),
-            'colorfulness_loss': colorfulness_loss.item(),
+            'perceptual_loss': perceptual_loss.item()*self.perceptual_weight,
+            'colorfulness_loss': colorfulness_loss.item()*self.colorfulness_weight,
             'colorfulness_recon': colorfulness_recon.item(),
             'colorfulness_original': colorfulness_original.item()
         })
@@ -534,7 +534,7 @@ class GeneratorColorizationLoss:
         return {
             'loss': total_loss,
             'reconstruction_loss': reconstruction_loss,
-            'perceptual_loss': perceptual_loss,
-            'colorfulness_loss': colorfulness_loss,
+            'perceptual_loss': perceptual_loss*self.perceptual_weight,
+            'colorfulness_loss': colorfulness_loss*self.colorfulness_weight,
             'reconstructed_images': reconstructed_images
         }
