@@ -722,9 +722,6 @@ class ColorizationTransformerNet(nn.Module):
             embed_dim=embed_dim
         )
 
-        # Project back to appropriate number of channels
-        self.color_projection = nn.Linear(embed_dim, output_channels)
-
         self.patch_upsample = PatchUpsample(
             patch_size=patch_size,
             embed_dim=output_channels,  # Dynamic output
@@ -737,7 +734,7 @@ class ColorizationTransformerNet(nn.Module):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             num_layers=num_layers,
-            output_dim=embed_dim,
+            output_dim=output_channels,
             use_decoder_masking=use_decoder_masking,
             only_use_encoder=only_use_encoder
         )
@@ -788,11 +785,9 @@ class ColorizationTransformerNet(nn.Module):
             encoder_input=encoder_input,
             decoder_input=decoder_input,
             seq_length=current_seq_len
-        )  # [B, seq_len, embed_dim]
+        )  # [B, seq_len, output_channels]
 
-        output_patches = self.color_projection(color_embeddings)  # [B, seq_len, output_channels]
-
-        output = self.patch_upsample(output_patches)  # [B, output_channels, H, W]
+        output = self.patch_upsample(color_embeddings)  # [B, output_channels, H, W]
 
         return self._sigmoid(output)
 
