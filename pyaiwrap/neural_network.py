@@ -886,7 +886,7 @@ class ColorizationTransformerNet(nn.Module):
             target_patches = self.color_embed(target_rgb)  # [B, num_patches, embed_dim]
             decoder_input = target_patches
         else:
-            print(f"Target RGB: {target_rgb}")
+            print(f"self.training: {self.training}")
             initial_colors = self._get_initial_colors(grayscale_img)
             color_patches = self.color_embed(initial_colors)
             decoder_input = color_patches
