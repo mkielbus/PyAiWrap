@@ -880,10 +880,13 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
+        print(f"Input grayscale shape: {grayscale_img.shape}")
         if self.training and target_rgb is not None:
+            print(f"Target RGB shape: {target_rgb.shape}")
             target_patches = self.color_embed(target_rgb)  # [B, num_patches, embed_dim]
             decoder_input = target_patches
         else:
+            print(f"Target RGB: {target_rgb}")
             initial_colors = self._get_initial_colors(grayscale_img)
             color_patches = self.color_embed(initial_colors)
             decoder_input = color_patches
