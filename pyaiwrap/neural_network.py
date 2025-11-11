@@ -688,7 +688,8 @@ class ColorizationTransformerNet(nn.Module):
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  patch_size: int = 16,
-                 use_decoder_masking: bool = True,
+                 use_decoder_masking: bool = False,
+                 only_use_encoder: bool = True,
                  output_channels: int = 3,
                  **kwargs):
         """
@@ -707,6 +708,7 @@ class ColorizationTransformerNet(nn.Module):
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.output_channels = output_channels
+        self._only_use_encoder = only_use_encoder
 
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
@@ -737,7 +739,7 @@ class ColorizationTransformerNet(nn.Module):
             num_layers=num_layers,
             output_dim=embed_dim,
             use_decoder_masking=use_decoder_masking,
-            only_use_encoder=False
+            only_use_encoder=only_use_encoder
         )
 
         self._sigmoid = nn.Sigmoid()
@@ -767,16 +769,20 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
-        if rgb_img is None:
-            initial_colors = self._get_initial_colors(grayscale_img)
-            pred_patches = self.color_embed(initial_colors)
-            decoder_input = pred_patches
+        if self._only_use_encoder:
+            decoder_input = None
+            current_seq_len = None
         else:
-            pred_patches = self.color_embed(rgb_img)
-            decoder_input = pred_patches
-        current_seq_len = decoder_input.size(1)
-        color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
-        decoder_input = decoder_input + color_pos_encoding[:, :current_seq_len, :]
+            if rgb_img is None:
+                initial_colors = self._get_initial_colors(grayscale_img)
+                pred_patches = self.color_embed(initial_colors)
+                decoder_input = pred_patches
+            else:
+                pred_patches = self.color_embed(rgb_img)
+                decoder_input = pred_patches
+            current_seq_len = decoder_input.size(1)
+            color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
+            decoder_input = decoder_input + color_pos_encoding[:, :current_seq_len, :]
 
         color_embeddings = self.transformer(
             encoder_input=encoder_input,
