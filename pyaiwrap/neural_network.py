@@ -963,7 +963,9 @@ class NeuralNetworkLayer(nn.Module):
             else:
                 raise e
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, additional: torch.Tensor = None) -> torch.Tensor:
+        if additional is not None:
+            return self._layer(x, additional)
         return self._layer(x)
 
 
@@ -1010,7 +1012,13 @@ class NeuralNetwork(nn.Module):
                                                                                    layers_list[index].__class__)
         self._layers = nn.Sequential(*layers_list)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, additional: torch.Tensor = None) -> torch.Tensor:
+        if additional is not None:
+            layers_list = self._conditionalAccesToLayersList(0)
+            x = layers_list[0](x, additional)
+            for layer in layers_list[1:]:
+                x = layer(x)
+            return x
         return self._layers(x)
 
 
