@@ -793,6 +793,139 @@ class ImageTransformerNet(nn.Module):
         return x_out
 
 
+class ColorizationTransformerNet(nn.Module):
+    """
+    Specialized transformer for grayscale to RGB colorization.
+    Uses encoder-decoder architecture with proper separation of grayscale context and color generation.
+
+    Usage:
+    {"type": "ColorizationTransformerNet", "params": {"embed_dim": 512, "num_layers": 6}}
+    """
+    def __init__(self,
+                 embed_dim: int = 512,
+                 num_heads: int = 8,
+                 mlp_ratio: int = 4,
+                 dropout: float = 0.1,
+                 num_layers: int = 6,
+                 patch_size: int = 16,
+                 use_decoder_masking: bool = True,
+                 **kwargs):
+        """
+        Args:
+            embed_dim: Dimension of patch embeddings
+            num_heads: Number of attention heads
+            mlp_ratio: Expansion ratio for MLP
+            dropout: Dropout probability
+            num_layers: Number of encoder AND decoder layers
+            patch_size: Size of image patches
+            use_decoder_masking: Whether to use causal masking in decoder
+        """
+        super().__init__()
+
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+
+        # Separate embeddings for grayscale (encoder) and RGB (decoder)
+        self.grayscale_embed = PatchEmbed(
+            patch_size=patch_size,
+            in_channels=1,  # Grayscale input
+            embed_dim=embed_dim
+        )
+        self.color_embed = PatchEmbed(
+            patch_size=patch_size,
+            in_channels=3,  # RGB output
+            embed_dim=embed_dim
+        )
+
+        self.color_projection = nn.Linear(embed_dim, 3)
+
+        self.patch_upsample = PatchUpsample(
+            patch_size=patch_size,
+            embed_dim=3,  # RGB output
+            out_channels=3
+        )
+
+        self.transformer = TransformerNet(
+            dim=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            num_layers=num_layers,
+            output_dim=embed_dim,  # Output color embeddings
+            use_decoder_masking=use_decoder_masking,
+            only_use_encoder=False
+        )
+
+    def forward(self,
+                grayscale_img: torch.Tensor,
+                target_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for colorization.
+
+        Args:
+            grayscale_img: [B, 1, H, W] - input grayscale image
+            target_rgb: [B, 3, H, W] - target RGB image (for teacher forcing during training)
+
+        Returns:
+            output: [B, 3, H, W] - colorized RGB image
+        """
+        batch_size, _, h, w = grayscale_img.shape
+
+        patch_h = h // self.patch_size
+        patch_w = w // self.patch_size
+        num_patches = patch_h * patch_w
+
+        grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
+
+        grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
+        encoder_input = grayscale_patches + grayscale_pos_encoding
+
+        if self.training and target_rgb is not None:
+            target_patches = self.color_embed(target_rgb)  # [B, num_patches, embed_dim]
+            decoder_input = target_patches
+        else:
+            initial_colors = self._get_initial_colors(grayscale_img)
+            color_patches = self.color_embed(initial_colors)
+            decoder_input = color_patches
+
+        current_seq_len = decoder_input.size(1)
+        color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
+        decoder_input = decoder_input + color_pos_encoding[:, :current_seq_len, :]
+
+        color_embeddings = self.transformer(
+            encoder_input=encoder_input,
+            decoder_input=decoder_input,
+            seq_length=current_seq_len
+        )  # [B, seq_len, embed_dim]
+
+        # Color embeddings back to RGB values
+        rgb_patches = self.color_projection(color_embeddings)  # [B, seq_len, 3]
+
+        # Reconstruct image from patches
+        rgb_output = self.patch_upsample(rgb_patches)  # [B, 3, H, W]
+
+        return rgb_output
+
+    def _get_initial_colors(self, grayscale_img: torch.Tensor) -> torch.Tensor:
+        """
+        Get initial color estimate.
+        """
+        # Grayscale to desaturated colors
+        batch_size, _, h, w = grayscale_img.shape
+        initial_rgb = grayscale_img.expand(-1, 3, -1, -1)  # [B, 3, H, W]
+        return initial_rgb
+
+    def train(self, mode: bool = True):
+        """Override train to handle teacher forcing"""
+        super().train(mode)
+        return self
+
+    def eval(self):
+        """Override eval for inference"""
+        super().eval()
+        return self
+
+
 class NeuralNetworkLayer(nn.Module):
     """
     A wrapper around a single torch.nn layer.
@@ -1044,7 +1177,7 @@ class UNetEncoderBlock(nn.Module):
 class UNetDecoderBlock(nn.Module):
     """UNet decoder block with summed skip connections"""
 
-    def __init__(self, in_channels: int, out_channels: int, upsample: bool = True, 
+    def __init__(self, in_channels: int, out_channels: int, upsample: bool = True,
                  skip_connection: str = "", block_name: str = ""):
         super().__init__()
         self._skip_connection_name = skip_connection

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
+from neural_network import ColorizationTransformerNet
 
 
 class LPIPSLoss(nn.Module):
@@ -487,8 +488,10 @@ class GeneratorColorizationLoss:
 
         modified_images, original_images = batch[0], batch[1]
 
-        reconstructed_images = generator(modified_images)
-
+        if isinstance(generator, ColorizationTransformerNet):
+            reconstructed_images = generator(modified_images, original_images)
+        else:
+            reconstructed_images = generator(modified_images)
         reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
 
         # Perceptual loss (LPIPS)
