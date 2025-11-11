@@ -402,28 +402,32 @@ class PatchEmbed(nn.Module):
 
 
 class PatchUpsample(nn.Module):
+    """
+    Reconstruct image from patch embeddings using transposed convolution
+    Input: [B, num_patches, embed_dim]
+    Output: [B, out_channels, H, W]
+    """
     def __init__(self, patch_size=4, embed_dim=384, out_channels=3):
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.out_channels = out_channels
-        self.proj = nn.Conv2d(embed_dim, out_channels, kernel_size=1)
+        self.proj = nn.ConvTranspose2d(
+            embed_dim, out_channels,
+            kernel_size=patch_size,
+            stride=patch_size
+        )
 
     def forward(self, x):
+        # [B, num_patches, embed_dim]
         B, num_patches, embed_dim = x.shape
-        h = w = int(num_patches ** 0.5)
-
-        x = x.transpose(1, 2).view(B, embed_dim, h, w)
+        h = w = int(num_patches ** 0.5)  # patches are squares of pixels
+        # [B, embed_dim, h, w]
+        x = x.transpose(1, 2)  # [B, embed_dim, num_patches]
+        x = x.view(B, embed_dim, h, w)  # [B, embed_dim, h, w]
+        # [B, out_channels, h*patch_size, w*patch_size]
         x = self.proj(x)
-
-        x = F.interpolate(
-            x,
-            scale_factor=self.patch_size,
-            mode='bicubic',
-            align_corners=False,
-            antialias=True
-        )
-        return x  # [B, out_channels, H, W]
+        return x
 
 
 class TransformerNet(nn.Module):
