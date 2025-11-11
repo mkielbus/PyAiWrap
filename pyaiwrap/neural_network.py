@@ -795,12 +795,11 @@ class ImageTransformerNet(nn.Module):
 
 class ColorizationTransformerNet(nn.Module):
     """
-    Specialized transformer for grayscale to RGB colorization.
+    Specialized transformer for grayscale to RGB/single-channel colorization.
     Uses encoder-decoder architecture with proper separation of grayscale context and color generation.
-
-    Usage:
-    {"type": "ColorizationTransformerNet", "params": {"embed_dim": 512, "num_layers": 6}}
+    Implements scheduled sampling to bridge training-inference gap.
     """
+
     def __init__(self,
                  embed_dim: int = 512,
                  num_heads: int = 8,
@@ -809,6 +808,8 @@ class ColorizationTransformerNet(nn.Module):
                  num_layers: int = 6,
                  patch_size: int = 16,
                  use_decoder_masking: bool = True,
+                 output_channels: int = 3,
+                 max_epochs_of_decay: int = 100,
                  **kwargs):
         """
         Args:
@@ -819,30 +820,38 @@ class ColorizationTransformerNet(nn.Module):
             num_layers: Number of encoder AND decoder layers
             patch_size: Size of image patches
             use_decoder_masking: Whether to use causal masking in decoder
+            output_channels: Number of output channels (1 for single channel, 3 for RGB)
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.patch_size = patch_size
+        self.output_channels = output_channels
+        self._epoch = 0
+        self._max_epochs_of_decay = max_epochs_of_decay
 
-        # Separate embeddings for grayscale (encoder) and RGB (decoder)
+        # Teacher forcing probability
+        self.teacher_forcing_prob = 0.8
+
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
             in_channels=1,  # Grayscale input
             embed_dim=embed_dim
         )
+
         self.color_embed = PatchEmbed(
             patch_size=patch_size,
-            in_channels=3,  # RGB output
+            in_channels=output_channels,  # Dynamic output channels
             embed_dim=embed_dim
         )
 
-        self.color_projection = nn.Linear(embed_dim, 3)
+        # Project back to appropriate number of channels
+        self.color_projection = nn.Linear(embed_dim, output_channels)
 
         self.patch_upsample = PatchUpsample(
             patch_size=patch_size,
-            embed_dim=3,  # RGB output
-            out_channels=3
+            embed_dim=output_channels,  # Dynamic output
+            out_channels=output_channels
         )
 
         self.transformer = TransformerNet(
@@ -851,7 +860,7 @@ class ColorizationTransformerNet(nn.Module):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             num_layers=num_layers,
-            output_dim=embed_dim,  # Output color embeddings
+            output_dim=embed_dim,
             use_decoder_masking=use_decoder_masking,
             only_use_encoder=False
         )
@@ -860,33 +869,48 @@ class ColorizationTransformerNet(nn.Module):
                 grayscale_img: torch.Tensor,
                 target_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Forward pass for colorization.
+        Forward pass for colorization with scheduled sampling.
 
         Args:
             grayscale_img: [B, 1, H, W] - input grayscale image
-            target_rgb: [B, 3, H, W] - target RGB image (for teacher forcing during training)
+            target_rgb: [B, C, H, W] - target color image (for teacher forcing during training)
 
         Returns:
-            output: [B, 3, H, W] - colorized RGB image
+            output: [B, C, H, W] - colorized output image
         """
         batch_size, _, h, w = grayscale_img.shape
+        if h % self.patch_size != 0 or w % self.patch_size != 0:
+            raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({self.patch_size})")
 
         patch_h = h // self.patch_size
         patch_w = w // self.patch_size
         num_patches = patch_h * patch_w
 
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
-
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
         if self.training and target_rgb is not None:
-            target_patches = self.color_embed(target_rgb)  # [B, num_patches, embed_dim]
-            decoder_input = target_patches
+            gt_patches = self.color_embed(target_rgb)  # Ground truth patches
+            with torch.no_grad():
+                initial_colors = self._get_initial_colors(grayscale_img)
+                pred_patches = self.color_embed(initial_colors)
+            # Randomly choose between teacher forcing and free-running
+            if torch.rand(1).item() < self.teacher_forcing_prob:
+                # Teacher forcing: use ground truth with small noise for robustness
+                noise = torch.randn_like(gt_patches) * 0.01
+                decoder_input = gt_patches + noise
+                self._last_mode = "teacher_forcing"
+            else:
+                decoder_input = pred_patches
+                self._last_mode = "free_running"
+            self._epoch += 1
+            self._updateTeacherForcingProb(self._epoch, self._max_epochs_of_decay)
         else:
             initial_colors = self._get_initial_colors(grayscale_img)
-            color_patches = self.color_embed(initial_colors)
-            decoder_input = color_patches
+            pred_patches = self.color_embed(initial_colors)
+            decoder_input = pred_patches
+            self._last_mode = "inference"
 
         current_seq_len = decoder_input.size(1)
         color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
@@ -898,32 +922,80 @@ class ColorizationTransformerNet(nn.Module):
             seq_length=current_seq_len
         )  # [B, seq_len, embed_dim]
 
-        # Color embeddings back to RGB values
-        rgb_patches = self.color_projection(color_embeddings)  # [B, seq_len, 3]
+        output_patches = self.color_projection(color_embeddings)  # [B, seq_len, output_channels]
 
-        # Reconstruct image from patches
-        rgb_output = self.patch_upsample(rgb_patches)  # [B, 3, H, W]
+        output = self.patch_upsample(output_patches)  # [B, output_channels, H, W]
 
-        return rgb_output
+        return output
 
     def _get_initial_colors(self, grayscale_img: torch.Tensor) -> torch.Tensor:
         """
-        Get initial color estimate.
+        Get initial color estimate with small variations to prevent mode collapse.
+        Args:
+            grayscale_img: [B, 1, H, W] input grayscale
+        Returns:
+            initial_colors: [B, C, H, W] initial color estimate
         """
-        # Grayscale to desaturated colors
         batch_size, _, h, w = grayscale_img.shape
-        initial_rgb = grayscale_img.expand(-1, 3, -1, -1)  # [B, 3, H, W]
-        return initial_rgb
+        if self.output_channels == 1:
+            noise = torch.randn_like(grayscale_img) * 0.05
+            initial_colors = torch.clamp(grayscale_img + noise, 0, 1)
+        else:
+            base = grayscale_img
+            noise_r = torch.randn_like(base) * 0.03
+            noise_g = torch.randn_like(base) * 0.03
+            noise_b = torch.randn_like(base) * 0.03
+
+            initial_colors = torch.cat([
+                torch.clamp(base + noise_r, 0, 1),      # Red channel
+                torch.clamp(base + noise_g, 0, 1),      # Green channel
+                torch.clamp(base + noise_b, 0, 1)       # Blue channel
+            ], dim=1)
+
+        return initial_colors
+
+    def _updateTeacherForcingProb(self, epoch: int, max_epochs_of_decay: int,
+                                  min_prob: float = 0.1, max_prob: float = 0.8):
+        """
+        Update teacher forcing probability for curriculum learning.
+        Args:
+            epoch: Current epoch number
+            total_epochs: Total number of epochs
+            min_prob: Minimum teacher forcing probability (end of training)
+            max_prob: Maximum teacher forcing probability (start of training)
+        """
+        # Linear decay from max_prob to min_prob
+        progress = epoch / max_epochs_of_decay
+        self.teacher_forcing_prob = max(min_prob, max_prob - (max_prob - min_prob) * progress)
+
+    def getTrainingMode(self) -> str:
+        """
+        Get the current training mode (for debugging/monitoring).
+        Returns:
+            Current mode: "teacher_forcing", "free_running", or "inference"
+        """
+        return getattr(self, '_last_mode', 'unknown')
 
     def train(self, mode: bool = True):
-        """Override train to handle teacher forcing"""
+        """Override train to handle teacher forcing tracking"""
         super().train(mode)
+        if mode:
+            self._last_mode = "unknown"
         return self
 
     def eval(self):
         """Override eval for inference"""
         super().eval()
+        self._last_mode = "inference"
         return self
+
+    def __repr__(self):
+        return (f"ColorizationTransformerNet("
+                f"embed_dim={self.embed_dim}, "
+                f"patch_size={self.patch_size}, "
+                f"output_channels={self.output_channels}, "
+                f"num_layers={self.transformer.num_layers}, "
+                f"teacher_forcing_prob={self.teacher_forcing_prob:.2f})")
 
 
 class NeuralNetworkLayer(nn.Module):
