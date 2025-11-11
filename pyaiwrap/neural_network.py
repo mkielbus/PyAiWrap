@@ -470,7 +470,8 @@ class ImageTransformerBlock(nn.Module):
         else:
             return self._forward_pixels(x, context_key, context_value)
 
-    def _forward_patches(self, x: torch.Tensor, context_key: Optional[torch.Tensor], context_value: Optional[torch.Tensor]) -> torch.Tensor:
+    def _forward_patches(self, x: torch.Tensor, context_key: Optional[torch.Tensor],
+                         context_value: Optional[torch.Tensor]) -> torch.Tensor:
         """Process image using patches with your positional encoding"""
         b, c, h, w = x.shape
         # [B, C, H, W] -> [B, num_patches, C]
@@ -671,126 +672,6 @@ class TransformerNet(nn.Module):
         output = self._output(output)  # [B, N_dec or N_enc, output_dim]
 
         return output
-
-
-class ImageTransformerNet(nn.Module):
-    """
-    Wrapper for TransformerNet to handle spatial data (images).
-    Supports optional patch-based processing for backward compatibility.
-
-    Usage:
-    {"type": "ImageTransformerNet", "params": {"channels": 64, "num_layers": 6}}
-    {"type": "ImageTransformerNet", "params": {"channels": 64, "num_layers": 6, "use_patches": true, "patch_size": 16}}
-    """
-    def __init__(self,
-                 channels: int,
-                 embed_channels: int = 1,
-                 num_heads: int = 8,
-                 mlp_ratio: int = 4,
-                 dropout: float = 0.1,
-                 num_layers: int = 6,
-                 use_decoder_masking: bool = False,
-                 only_use_encoder: bool = True,
-                 **kwargs):  # Accept additional kwargs for backward compatibility
-        """
-        Args:
-            channels: Number of image channels (C)
-            num_heads: Number of attention heads
-            mlp_ratio: Expansion ratio for MLP
-            dropout: Dropout probability
-            num_layers: Number of encoder AND decoder layers
-            **kwargs: Additional arguments for patch support (use_patches, patch_size)
-        """
-        super().__init__()
-
-        self.channels = channels
-        self._embed_channels = embed_channels
-
-        self.use_patches = kwargs.pop('use_patches', False)
-        self.patch_size = kwargs.pop('patch_size', 16)
-
-        if self.use_patches:
-            self.patch_embed = PatchEmbed(patch_size=self.patch_size, in_channels=channels, embed_dim=embed_channels)
-            self.patch_upsample = PatchUpsample(patch_size=self.patch_size, embed_dim=embed_channels,
-                                                out_channels=channels)
-        else:
-            self._pixel_embed = nn.Linear(channels, embed_channels)
-            self._pixel_unembed = nn.Linear(embed_channels, channels)
-
-        # Output_dim = channels (preserving shape)
-        self._transformer_net = TransformerNet(
-            dim=embed_channels,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            dropout=dropout,
-            num_layers=num_layers,
-            output_dim=embed_channels,  # Output same number of channels
-            use_decoder_masking=use_decoder_masking,
-            only_use_encoder=only_use_encoder
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for images.
-
-        Args:
-            x: [B, C, H, W] - input image
-
-        Returns:
-            output: [B, C, H, W] - output image (same shape as input)
-        """
-        if self.use_patches:
-            return self._forward_patches(x)
-        else:
-            return self._forward_pixels(x)
-
-    def _forward_patches(self, x: torch.Tensor) -> torch.Tensor:
-        """Patch-based forward pass"""
-        b, c, h, w = x.shape
-
-        # [B, C, H, W] -> [B, num_patches, C]
-        x_patches = self.patch_embed(x)
-
-        patch_h = h // self.patch_size
-        patch_w = w // self.patch_size
-        num_patches = patch_h * patch_w
-
-        pos_encoding = distancePositionalEncoding(patch_h, patch_w, self._embed_channels, x.device)
-        x_patches = x_patches + pos_encoding
-
-        x_patches = self._transformer_net(encoder_input=x_patches,
-                                          decoder_input=x_patches,  # Teacher forcing
-                                          seq_length=num_patches)
-
-        # [B, num_patches, C] -> [B, C, H, W]
-        x_out = self.patch_upsample(x_patches)
-
-        return x_out
-
-    def _forward_pixels(self, x: torch.Tensor) -> torch.Tensor:
-        """Original pixel-wise forward pass (backward compatible)"""
-        b, c, h, w = x.shape
-
-        # [B, C, H, W] -> [B, H*W, C]
-        x_flat = x.view(b, c, h * w)  # [B, C, H*W]
-        x_flat = x_flat.transpose(1, 2)  # [B, H*W, C]
-        x_flat = self._pixel_embed(x_flat)
-
-        pos_encoding = distancePositionalEncoding(h, w, self._embed_channels, x.device)
-        x_flat = x_flat + pos_encoding
-
-        # Input: [B, H*W, C]
-        # Output: [B, H*W, C]
-        x_flat = self._transformer_net(encoder_input=x_flat,
-                                       decoder_input=x_flat,  # Teacher forcing
-                                       seq_length=h * w)
-
-        x_flat = self._pixel_unembed(x_flat)  # [B, H*W, channels]
-        # [B, H*W, C] -> [B, C, H, W]
-        x_flat = x_flat.transpose(1, 2)  # [B, C, H*W]
-        x_out = x_flat.view(b, c, h, w)  # [B, C, H, W]
-
-        return x_out
 
 
 class ColorizationTransformerNet(nn.Module):
