@@ -639,7 +639,7 @@ class ColorizationTransformerNet(nn.Module):
 
         self.color_embed = PatchEmbed(
             patch_size=patch_size,
-            in_channels=output_channels,  # Dynamic output channels
+            in_channels=3,  # Dynamic output channels
             embed_dim=embed_dim
         )
 
