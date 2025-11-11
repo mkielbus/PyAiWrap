@@ -175,10 +175,6 @@ def train(
                     launch_number=launch_number
                 )
 
-        for model_name, model in models.items():
-            model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
-            torch.save(model.state_dict(), model_path)
-
         metrics.save(diagrams_data_path, hyperparams_id, model_type, launch_number)
 
         val_metric = metrics.getMetric(epoch + 1, 'val', early_stopping_metric)
@@ -186,6 +182,9 @@ def train(
         if best_val_metric is None or val_metric < best_val_metric:
             best_val_metric = val_metric
             current_patience = 0
+            for model_name, model in models.items():
+                model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
+                torch.save(model.state_dict(), model_path)
         else:
             current_patience += 1
 
