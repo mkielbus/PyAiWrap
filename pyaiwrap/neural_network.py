@@ -690,7 +690,6 @@ class ColorizationTransformerNet(nn.Module):
                  patch_size: int = 16,
                  use_decoder_masking: bool = True,
                  output_channels: int = 3,
-                 max_epochs_of_decay: int = 100,
                  **kwargs):
         """
         Args:
@@ -708,11 +707,6 @@ class ColorizationTransformerNet(nn.Module):
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.output_channels = output_channels
-        self._epoch = 0
-        self._max_epochs_of_decay = max_epochs_of_decay
-
-        # Teacher forcing probability
-        self.teacher_forcing_prob = 0.8
 
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
@@ -746,9 +740,11 @@ class ColorizationTransformerNet(nn.Module):
             only_use_encoder=False
         )
 
+        self._sigmoid = nn.Sigmoid()
+
     def forward(self,
                 grayscale_img: torch.Tensor,
-                target_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
+                rgb_img: torch.Tensor | None = None) -> torch.Tensor:
         """
         Forward pass for colorization with scheduled sampling.
 
@@ -771,28 +767,13 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
-        if self.training and target_rgb is not None:
-            gt_patches = self.color_embed(target_rgb)  # Ground truth patches
-            with torch.no_grad():
-                initial_colors = self._get_initial_colors(grayscale_img)
-                pred_patches = self.color_embed(initial_colors)
-            # Randomly choose between teacher forcing and free-running
-            if torch.rand(1).item() < self.teacher_forcing_prob:
-                # Teacher forcing: use ground truth with small noise for robustness
-                noise = torch.randn_like(gt_patches) * 0.01
-                decoder_input = gt_patches + noise
-                self._last_mode = "teacher_forcing"
-            else:
-                decoder_input = pred_patches
-                self._last_mode = "free_running"
-            self._epoch += 1
-            self._updateTeacherForcingProb(self._epoch, self._max_epochs_of_decay)
-        else:
+        if rgb_img is None:
             initial_colors = self._get_initial_colors(grayscale_img)
             pred_patches = self.color_embed(initial_colors)
             decoder_input = pred_patches
-            self._last_mode = "inference"
-
+        else:
+            pred_patches = self.color_embed(rgb_img)
+            decoder_input = pred_patches
         current_seq_len = decoder_input.size(1)
         color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         decoder_input = decoder_input + color_pos_encoding[:, :current_seq_len, :]
@@ -807,7 +788,7 @@ class ColorizationTransformerNet(nn.Module):
 
         output = self.patch_upsample(output_patches)  # [B, output_channels, H, W]
 
-        return output
+        return self._sigmoid(output)
 
     def _get_initial_colors(self, grayscale_img: torch.Tensor) -> torch.Tensor:
         """
@@ -834,49 +815,6 @@ class ColorizationTransformerNet(nn.Module):
             ], dim=1)
 
         return initial_colors
-
-    def _updateTeacherForcingProb(self, epoch: int, max_epochs_of_decay: int,
-                                  min_prob: float = 0.1, max_prob: float = 0.8):
-        """
-        Update teacher forcing probability for curriculum learning.
-        Args:
-            epoch: Current epoch number
-            total_epochs: Total number of epochs
-            min_prob: Minimum teacher forcing probability (end of training)
-            max_prob: Maximum teacher forcing probability (start of training)
-        """
-        # Linear decay from max_prob to min_prob
-        progress = epoch / max_epochs_of_decay
-        self.teacher_forcing_prob = max(min_prob, max_prob - (max_prob - min_prob) * progress)
-
-    def getTrainingMode(self) -> str:
-        """
-        Get the current training mode (for debugging/monitoring).
-        Returns:
-            Current mode: "teacher_forcing", "free_running", or "inference"
-        """
-        return getattr(self, '_last_mode', 'unknown')
-
-    def train(self, mode: bool = True):
-        """Override train to handle teacher forcing tracking"""
-        super().train(mode)
-        if mode:
-            self._last_mode = "unknown"
-        return self
-
-    def eval(self):
-        """Override eval for inference"""
-        super().eval()
-        self._last_mode = "inference"
-        return self
-
-    def __repr__(self):
-        return (f"ColorizationTransformerNet("
-                f"embed_dim={self.embed_dim}, "
-                f"patch_size={self.patch_size}, "
-                f"output_channels={self.output_channels}, "
-                f"num_layers={self.transformer.num_layers}, "
-                f"teacher_forcing_prob={self.teacher_forcing_prob:.2f})")
 
 
 class NeuralNetworkLayer(nn.Module):
@@ -916,9 +854,7 @@ class NeuralNetworkLayer(nn.Module):
             else:
                 raise e
 
-    def forward(self, x: torch.Tensor, additional: torch.Tensor = None) -> torch.Tensor:
-        if additional is not None:
-            return self._layer(x, additional)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self._layer(x)
 
 
@@ -965,13 +901,7 @@ class NeuralNetwork(nn.Module):
                                                                                    layers_list[index].__class__)
         self._layers = nn.Sequential(*layers_list)
 
-    def forward(self, x: torch.Tensor, additional: torch.Tensor = None) -> torch.Tensor:
-        if additional is not None:
-            layers_list = self._conditionalAccesToLayersList(0)
-            x = layers_list[0](x, additional)
-            for layer in layers_list[1:]:
-                x = layer(x)
-            return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self._layers(x)
 
 

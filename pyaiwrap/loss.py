@@ -487,15 +487,7 @@ class GeneratorColorizationLoss:
         generator = models['generator']
 
         modified_images, original_images = batch[0], batch[1]
-
-        is_colorization_transformer = False
-        for layer in generator._layers:
-            if isinstance(layer._layer, ColorizationTransformerNet):
-                is_colorization_transformer = True
-        if is_colorization_transformer:
-            reconstructed_images = generator(modified_images, original_images)
-        else:
-            reconstructed_images = generator(modified_images)
+        reconstructed_images = generator(modified_images)
         reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
 
         # Perceptual loss (LPIPS)
