@@ -656,8 +656,6 @@ class ColorizationTransformerNet(nn.Module):
             only_use_encoder=only_use_encoder
         )
 
-        self._sigmoid = nn.Sigmoid()
-
     def forward(self,
                 grayscale_img: torch.Tensor,
                 rgb_img: torch.Tensor | None = None) -> torch.Tensor:
@@ -706,7 +704,7 @@ class ColorizationTransformerNet(nn.Module):
 
         output = self.patch_upsample(color_embeddings)  # [B, output_channels, H, W]
 
-        return self._sigmoid(output)
+        return output
 
     def _get_initial_colors(self, grayscale_img: torch.Tensor) -> torch.Tensor:
         """
