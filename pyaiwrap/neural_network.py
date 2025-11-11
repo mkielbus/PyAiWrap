@@ -427,6 +427,13 @@ class PatchUpsample(nn.Module):
         x = x.view(B, embed_dim, h, w)  # [B, embed_dim, h, w]
         # [B, out_channels, h*patch_size, w*patch_size]
         x = self.proj(x)
+        x = F.interpolate(
+            x,
+            scale_factor=self.patch_size,
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        )
         return x
 
 
