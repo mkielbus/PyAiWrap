@@ -46,7 +46,8 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "STEP_GAMMA": 0.1,
 
         "IMAGE_RESIZE": 256,
-        "INPUT_CHANNELS": 1,
+        "INPUT_CHANNEL": "RGB",
+        "OUTPUT_CHANNELS": 3,
         "EPOCHS": 300,
         "DIAGRAMS_DATA_PATH": "./diagrams_data",
         "WEIGHTS_PATH": "./weights",
@@ -60,7 +61,8 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "LPIPS_NET": "alex",
         "COLORFULNESS_WEIGHT": 0.0,
         "COLORFULNESS_TARGET": None,
-        "TARGET_CHANNEL": "RGB"
+        "TARGET_CHANNEL": "RGB",
+        "TARGET_OUTPUT_CHANNELS": 3
     }
 
     for key, default_value in defaults.items():

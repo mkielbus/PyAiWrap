@@ -825,6 +825,230 @@ class NeuralNetwork(nn.Module):
         return self._layers(x)
 
 
+class ColorMemoryTransformer(nn.Module):
+    def __init__(self,
+                 embed_dim: int = 512,
+                 num_heads: int = 8,
+                 mlp_ratio: int = 4,
+                 dropout: float = 0.1,
+                 num_layers: int = 6,
+                 patch_size: int = 16,
+                 target_channel: str = 'red',
+                 memory_size: int = 256,
+                 color_channels: int = 64,
+                 smoothing_config_path: str = None):
+        super().__init__()
+
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+        self.target_channel = target_channel
+        self.memory_size = memory_size
+        self.num_layers = num_layers
+        self.color_channels = color_channels
+
+        if target_channel not in ['red', 'green', 'blue']:
+            raise ValueError("target_channel must be 'red', 'green', or 'blue'")
+
+        self.luminance_embed = PatchEmbed(
+            patch_size=patch_size,
+            in_channels=1,
+            embed_dim=embed_dim
+        )
+
+        self.target_channel_embed = PatchEmbed(
+            patch_size=patch_size,
+            in_channels=1,
+            embed_dim=embed_dim
+        )
+
+        self.color_memory = nn.Parameter(torch.randn(1, memory_size, embed_dim))
+
+        self.pixel_decoder_layers = nn.ModuleList([
+            TransformerBlock(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+                use_self_attention=True,
+                use_cross_attention=False,
+                use_causal_mask=False
+            )
+            for _ in range(num_layers)
+        ])
+
+        self.color_decoder_layers = nn.ModuleList()
+        for i in range(num_layers):
+            decoder_layer = nn.ModuleDict({
+                'cross_attention': MultiHeadAttention(
+                    query_dim=embed_dim,
+                    key_dim=embed_dim,
+                    value_dim=embed_dim,
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    use_causal_mask=False
+                ),
+                'norm1': nn.LayerNorm(embed_dim),
+                'self_attention': MultiHeadAttention(
+                    query_dim=embed_dim,
+                    key_dim=None,
+                    value_dim=None,
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    use_causal_mask=False
+                ),
+                'norm2': nn.LayerNorm(embed_dim),
+                'mlp': nn.Sequential(
+                    nn.Linear(embed_dim, embed_dim * mlp_ratio),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(embed_dim * mlp_ratio, embed_dim),
+                    nn.Dropout(dropout)
+                ),
+                'norm3': nn.LayerNorm(embed_dim)
+            })
+            self.color_decoder_layers.append(decoder_layer)
+
+        self.memory_learning_attention = MultiHeadAttention(
+            query_dim=embed_dim,
+            key_dim=embed_dim,
+            value_dim=embed_dim,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            use_causal_mask=False
+        )
+
+        self.color_projection = nn.Linear(embed_dim, color_channels)
+        self.pixel_projection = nn.Linear(embed_dim, 1)
+
+        self.pixel_upsample = PatchUpsample(
+            patch_size=patch_size,
+            embed_dim=1,
+            out_channels=1
+        )
+
+        self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
+
+    def _loadSmoothingNetwork(self, config_path: str) -> NeuralNetwork:
+        if config_path is None:
+            default_config = [
+                {"type": "Conv2d", "params": {"in_channels": 64, "out_channels": 32, "kernel_size": 3, "padding": 1}},
+                {"type": "BatchNorm2d", "params": {"num_features": 32}},
+                {"type": "ReLU", "params": {"inplace": True}},
+                {"type": "Conv2d", "params": {"in_channels": 32, "out_channels": 16, "kernel_size": 3, "padding": 1}},
+                {"type": "BatchNorm2d", "params": {"num_features": 16}},
+                {"type": "ReLU", "params": {"inplace": True}},
+                {"type": "Conv2d", "params": {"in_channels": 16, "out_channels": 1, "kernel_size": 3, "padding": 1}}
+            ]
+            return NeuralNetwork(default_config)
+
+        try:
+            with open(config_path, 'r') as f:
+                architecture = json.load(f)
+            return NeuralNetwork(architecture)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load smoothing network from {config_path}: {e}")
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        batch_size, channels, h, w = img.shape
+
+        if h % self.patch_size != 0 or w % self.patch_size != 0:
+            raise ValueError("Image size must be divisible by patch_size")
+
+        patch_h = h // self.patch_size
+        patch_w = w // self.patch_size
+        num_patches = patch_h * patch_w
+
+        if channels == 3:
+            luminance = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+            if self.target_channel == 'red':
+                target_channel_img = img[:, 0:1]
+            elif self.target_channel == 'green':
+                target_channel_img = img[:, 1:2]
+            else:
+                target_channel_img = img[:, 2:3]
+        elif channels == 1:
+            luminance = img
+            target_channel_img = None
+        else:
+            raise ValueError("Input must be 1-channel (luminance) or 3-channel (RGB)")
+
+        luminance_patches = self.luminance_embed(luminance)
+        luminance_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
+        encoder_input = luminance_patches + luminance_pos_encoding
+
+        pixel_decoder_outputs = []
+        current_pixel_output = encoder_input
+
+        for pixel_layer in self.pixel_decoder_layers:
+            current_pixel_output = pixel_layer(current_pixel_output)
+            pixel_decoder_outputs.append(current_pixel_output)
+
+        final_pixel_output = pixel_decoder_outputs[-1]  # [batch_size, patch_pixels, embed_dim]
+
+        # pixel decoder output: [batch_size, patch_pixels, embed_dim] -> [batch_size, 1, h, w]
+        pixel_features = self.pixel_projection(final_pixel_output)  # [batch_size, patch_pixels, 1]
+        pixel_features = self.pixel_upsample(pixel_features)  # [batch_size, 1, h, w]
+
+        if self.training and target_channel_img is not None:
+            target_patches = self.target_channel_embed(target_channel_img)
+            target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
+            target_patches = target_patches + target_pos_encoding
+
+            batch_color_memory = self.color_memory.repeat(batch_size, 1, 1)
+            updated_memory = self.memory_learning_attention(
+                query=batch_color_memory,
+                key=target_patches,
+                value=target_patches
+            )
+        else:
+            updated_memory = self.color_memory.repeat(batch_size, 1, 1)
+
+        color_decoder_input = luminance_patches
+
+        for i, color_layer in enumerate(self.color_decoder_layers):
+            if i == 0:
+                cross_attn_out = color_layer['cross_attention'](
+                    query=color_decoder_input,
+                    key=updated_memory,
+                    value=updated_memory
+                )
+            else:
+                cross_attn_out = color_layer['cross_attention'](
+                    query=color_decoder_input,
+                    key=pixel_decoder_outputs[i],
+                    value=pixel_decoder_outputs[i]
+                )
+
+            color_decoder_input = color_decoder_input + cross_attn_out
+            color_decoder_input = color_layer['norm1'](color_decoder_input)
+
+            self_attn_out = color_layer['self_attention'](query=color_decoder_input)
+            color_decoder_input = color_decoder_input + self_attn_out
+            color_decoder_input = color_layer['norm2'](color_decoder_input)
+
+            mlp_out = color_layer['mlp'](color_decoder_input)
+            color_decoder_input = color_decoder_input + mlp_out
+            color_decoder_input = color_layer['norm3'](color_decoder_input)
+
+        final_color_output = color_decoder_input  # [batch_size, patch_colors, embed_dim]
+
+        # color decoder output: [batch_size, patch_colors, embed_dim] -> [batch_size, color_channels, 1]
+        color_features = self.color_projection(final_color_output)  # [batch_size, patch_colors, color_channels]
+        color_features = color_features.mean(dim=1, keepdim=True)  # [batch_size, 1, color_channels]
+        color_features = color_features.transpose(1, 2)  # [batch_size, color_channels, 1]
+
+        # Dot product: [batch_size, color_channels, 1] * [batch_size, 1, h, w] -> [batch_size, color_channels, h, w]
+        output = torch.matmul(color_features, pixel_features)  # [batch_size, color_channels, h, w]
+
+        # Final smoothing of patches artifacts: [batch_size, color_channels, h, w] -> [batch_size, 1, h, w]
+        output = self.smoothing_layers(output)
+
+        return output
+
+
 class VAE(nn.Module):
     def __init__(
         self,
