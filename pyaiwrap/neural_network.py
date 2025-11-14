@@ -1040,8 +1040,9 @@ class ColorMemoryTransformer(nn.Module):
         color_features = color_features.mean(dim=1, keepdim=True)  # [batch_size, 1, color_channels]
         color_features = color_features.transpose(1, 2)  # [batch_size, color_channels, 1]
 
-        # Dot product: [batch_size, color_channels, 1] * [batch_size, 1, h, w] -> [batch_size, color_channels, h, w]
-        output = torch.matmul(color_features, pixel_features)  # [batch_size, color_channels, h, w]
+        pixel_flat = pixel_features.view(batch_size, 1, -1)  # [batch_size, 1, h*w]
+        output = torch.matmul(color_features, pixel_flat)  # [batch_size, color_channels, h*w]
+        output = output.view(batch_size, self.color_channels, h, w)  # [batch_size, color_channels, h, w]
 
         # Final smoothing of patches artifacts: [batch_size, color_channels, h, w] -> [batch_size, 1, h, w]
         output = self.smoothing_layers(output)
