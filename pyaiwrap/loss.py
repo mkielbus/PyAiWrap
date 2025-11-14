@@ -500,6 +500,7 @@ class GeneratorColorizationLoss:
 
         colorfulness_loss = torch.tensor(0.0, device=reconstruction_loss.device)
         colorfulness_original = torch.tensor(0.0, device=reconstruction_loss.device)
+        colorfulness_recon = torch.tensor(0.0, device=reconstruction_loss.device)
 
         if self.colorfulness_weight > 0:
             colorfulness_recon = calculateColorfulnessLoss(reconstructed_images)
