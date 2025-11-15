@@ -538,7 +538,7 @@ class GeneratorColorizationLoss:
 
     def calculateReconstructionLoss(self, reconstructed, original, modified):
         """Calculate reconstruction loss based on channel types"""
-        return self.reconstructionLossFn(reconstructed, original)
+        return self.reconstruction_loss_fn(reconstructed, original)
 
     def calculatePerceptualLoss(self, reconstructed, original, modified):
         """Calculate perceptual loss, converting to RGB if needed"""
