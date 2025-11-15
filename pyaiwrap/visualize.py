@@ -152,9 +152,10 @@ def visualizeReconstruction(originalImages: torch.Tensor,
 
     if is_colorization:
         # Colorization: L -> AB
-        originalRgb = convertToRgb(originalImages, "AB", paired_images=modifiedImages, input_range=original_range)
+        l_channel = modifiedImages * 100.0  # Convert L from [0,1] to [0,100]
+        originalRgb = convertToRgb(originalImages, "AB", paired_images=l_channel, input_range=original_range)
         modifiedRgb = convertToRgb(modifiedImages, "luminance", input_range=modified_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, "AB", paired_images=modifiedImages, input_range=reconstructed_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, "AB", paired_images=l_channel, input_range=reconstructed_range)
 
     elif is_ab_from_rgb:
         l_channel = 0.299 * modifiedImages[:, 0:1] + 0.587 * modifiedImages[:, 1:2] + 0.114 * modifiedImages[:, 2:3]
