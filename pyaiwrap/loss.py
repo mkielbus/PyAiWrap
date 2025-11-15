@@ -499,7 +499,7 @@ class GeneratorColorizationLoss:
         reconstructedImages = generator(modifiedImages)
 
         reconstructionLoss = self.calculateReconstructionLoss(
-            reconstructedImages, originalImages, modifiedImages
+            reconstructedImages, originalImages
         )
 
         perceptualLoss = torch.tensor(0.0, device=reconstructionLoss.device)
@@ -539,7 +539,7 @@ class GeneratorColorizationLoss:
             'reconstructed_images': reconstructedImages
         }
 
-    def calculateReconstructionLoss(self, reconstructed, original, modified):
+    def calculateReconstructionLoss(self, reconstructed, original):
         """Calculate reconstruction loss based on channel types"""
         return self.reconstruction_loss_fn(reconstructed, original)
 
@@ -564,8 +564,8 @@ class GeneratorColorizationLoss:
 
         if self.colorfulness_weight > 0:
             # Convert to RGB for colorfulness calculation
-            recon_rgb = self._convert_to_rgb_for_loss(reconstructed, original, modified)
-            original_rgb = self._convert_to_rgb_for_loss(original, original, modified)
+            recon_rgb = self._convert_to_rgb_for_loss(reconstructed, modified)
+            original_rgb = self._convert_to_rgb_for_loss(original, modified)
 
             colorfulnessRecon = calculateColorfulnessLoss(recon_rgb)
             colorfulnessOriginal = calculateColorfulnessLoss(original_rgb)
@@ -578,7 +578,7 @@ class GeneratorColorizationLoss:
 
         return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
 
-    def _convert_to_rgb_for_loss(self, images, original, modified):
+    def _convert_to_rgb_for_loss(self, images, modified):
         """Convert images to RGB for perceptual/colorfulness losses"""
         if self.target_channel == "RGB":
             return images

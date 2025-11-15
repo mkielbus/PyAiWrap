@@ -144,7 +144,7 @@ def visualizeReconstruction(originalImages: torch.Tensor,
     is_colorization = (inputChannel == "luminance" and targetChannel == "AB")
     is_ab_from_rgb = (inputChannel == "RGB" and targetChannel == "AB")
     is_lab_reconstruction = (inputChannel == "RGB" and targetChannel == "LAB")
-    is_single_channel = (inputChannel in ["R", "G", "B"] and targetChannel in ["R", "G", "B"])
+    is_single_channel = (inputChannel in ["R", "G", "B", "luminance"] and targetChannel in ["R", "G", "B"])
 
     if is_colorization:
         # Colorization: L -> AB
