@@ -250,7 +250,7 @@ class ExtractBlueChannelTo3Channel(ExtractChannelTo3Channel):
 
 
 class RGBToLab(ImageTransform):
-    """Convert RGB image to LAB color space and return as tensor"""
+    """Convert RGB image to LAB color space using PyTorch's built-in conversion"""
 
     def __init__(self):
         """Initialize RGB to LAB conversion"""
@@ -267,79 +267,40 @@ class RGBToLab(ImageTransform):
             raise TypeError(f"Unsupported type: {type(img)}")
 
     def _handleTensor(self, img):
-        """Convert tensor from RGB to LAB"""
+        """Convert tensor from RGB to LAB using PyTorch"""
         if img.shape[0] != 3:
             raise ValueError("Input tensor must have 3 channels for RGB to LAB conversion")
 
-        # Assuming tensor is in range [0, 1] and shape [C, H, W]
-        rgb = img.permute(1, 2, 0).numpy()  # Convert to HWC for conversion
-        lab = self._rgb_to_lab(rgb)
-        return torch.from_numpy(lab).permute(2, 0, 1).float()  # Convert back to CHW and ensure float
+        # Ensure RGB is in [0, 1] range for PyTorch conversion
+        if img.max() > 1.0:
+            img = img / 255.0
+
+        # Returns: L: [0, 100], A: [-128, 127], B: [-128, 127]
+        lab = TF.rgb_to_lab(img)
+        return lab
 
     def _handleNumpy(self, img):
         """Convert numpy array from RGB to LAB and return as tensor"""
         if img.ndim != 3 or img.shape[2] != 3:
             raise ValueError("Input array must have 3 channels for RGB to LAB conversion")
 
-        lab = self._rgb_to_lab(img)
-        return torch.from_numpy(lab).permute(2, 0, 1).float()
+        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+        return TF.rgb_to_lab(img_tensor)
 
     def _handlePil(self, img):
         """Convert PIL Image from RGB to LAB and return as tensor"""
         if img.mode != 'RGB':
             img = img.convert('RGB')
 
-        rgb_array = np.array(img)
-        lab_array = self._rgb_to_lab(rgb_array)
-        return torch.from_numpy(lab_array).permute(2, 0, 1).float()
-
-    def _rgb_to_lab(self, rgb):
-        """Convert RGB to LAB color space - returns float array"""
-        rgb = rgb.astype(np.float32) / 255.0
-
-        mask = rgb > 0.04045
-        rgb[mask] = ((rgb[mask] + 0.055) / 1.055) ** 2.4
-        rgb[~mask] = rgb[~mask] / 12.92
-
-        xyz = np.dot(rgb, self._get_rgb_to_xyz_matrix().T)
-
-        xyz = xyz / self._get_reference_white()
-
-        mask = xyz > 0.008856
-        xyz[mask] = xyz[mask] ** (1/3)
-        xyz[~mask] = (7.787 * xyz[~mask]) + (16 / 116)
-
-        x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
-
-        L = (116 * y) - 16
-        a = 500 * (x - y)
-        b = 200 * (y - z)
-
-        L = np.clip(L, 0, 100)
-        a = np.clip(a + 128, 0, 255)
-        b = np.clip(b + 128, 0, 255)
-
-        lab = np.stack([L, a, b], axis=-1).astype(np.float32)
-        return lab
-
-    def _get_rgb_to_xyz_matrix(self):
-        """Get RGB to XYZ conversion matrix (sRGB, D65)"""
-        return np.array([
-            [0.4124564, 0.3575761, 0.1804375],
-            [0.2126729, 0.7151522, 0.0721750],
-            [0.0193339, 0.1191920, 0.9503041]
-        ])
-
-    def _get_reference_white(self):
-        """Get reference white point (D65)"""
-        return np.array([0.95047, 1.0, 1.08883])
+        img_tensor = transforms.ToTensor()(img)
+        return TF.rgb_to_lab(img_tensor)
 
     def __repr__(self):
         return f"{self.__class__.__name__}()"
 
 
 class ExtractABChannels(ImageTransform):
-    """Extract A and B channels from LAB color space - expects tensor input"""
+    """Extract A and B channels from LAB color space using PyTorch ranges"""
 
     def __init__(self, num_output_channels: int = 2):
         """
@@ -364,6 +325,7 @@ class ExtractABChannels(ImageTransform):
             return self._handleTensor(img)
 
     def _handleTensor(self, img):
+        """Extract AB channels from tensor in LAB format"""
         if img.dim() != 3:
             raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
 
@@ -373,7 +335,9 @@ class ExtractABChannels(ImageTransform):
         if img.shape[0] == 2:
             ab_channels = img
         elif img.shape[0] == 3:
-            ab_channels = img[1:3, :, :] / 255.0
+            # PyTorch LAB format: L:[0,100], A:[-128,127], B:[-128,127]
+            #  AB to [0,1] range for model training
+            ab_channels = (img[1:3, :, :] + 128.0) / 255.0  # [-128,127] -> [0,1]
         else:
             raise ValueError(f"Unsupported tensor shape: {img.shape}")
 
@@ -408,7 +372,6 @@ class ExtractABChannelsTo3Channel(ImageTransform):
         if isinstance(img, torch.Tensor):
             return self._handleTensor(img)
         else:
-            # Convert to tensor if needed
             if isinstance(img, Image.Image):
                 img = transforms.ToTensor()(img)
             elif isinstance(img, np.ndarray):
@@ -424,9 +387,11 @@ class ExtractABChannelsTo3Channel(ImageTransform):
             raise ValueError("Cannot extract AB channels from single channel image")
 
         if img.shape[0] == 2:
+            # AB channels in [0,1] range
             ab_channels = img
         elif img.shape[0] == 3:
-            ab_channels = img[1:3, :, :]
+            # Extract AB and convert to [0,1] range
+            ab_channels = (img[1:3, :, :] + 128.0) / 255.0
         else:
             raise ValueError(f"Unsupported tensor shape: {img.shape}")
 
@@ -445,3 +410,37 @@ class ExtractABChannelsTo3Channel(ImageTransform):
 
     def __repr__(self):
         return f"{self.__class__.__name__}()"
+
+
+def labToRgb(lChannel, abChannels):
+    """
+    Convert L and AB channels to RGB using PyTorch's built-in conversion.
+
+    Args:
+        lChannel: L channel in [0,1] range (will be scaled to [0,100])
+        abChannels: AB channels in [0,1] range (will be scaled to [-128,127])
+
+    Returns:
+        RGB tensor in [0,1] range
+    """
+    l_scaled = lChannel * 100.0  # [0,1] -> [0,100]
+    ab_scaled = abChannels * 255.0 - 128.0  # [0,1] -> [-128,127]
+
+    lab = torch.cat([l_scaled, ab_scaled], dim=1)
+
+    return TF.lab_to_rgb(lab)
+
+
+def labToRgbForVisualization(labTensor):
+    """
+    Convert LAB tensor to RGB tensor for visualization purposes.
+    Uses PyTorch's built-in conversion.
+
+    Args:
+        labTensor: LAB tensor of shape (batch_size, 3, H, W) in PyTorch format
+                  L: [0,100], A: [-128,127], B: [-128,127]
+
+    Returns:
+        RGB tensor in range [0, 1]
+    """
+    return TF.lab_to_rgb(labTensor)

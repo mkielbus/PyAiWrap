@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
-from .visualize import labToRgb
+from .transforms import labToRgb
 
 
 class LPIPSLoss(nn.Module):
@@ -546,15 +546,15 @@ class GeneratorColorizationLoss:
         if self.target_channel == "ab" and reconstructed.shape[1] == 2:
             if modified.shape[1] == 3:  # RGB input
                 lChannel = self.rgbToLuminance(modified)
-                reconRgb = self.abToRgb(reconstructed, lChannel)
-                originalRgb = self.abToRgb(original, lChannel)
+                reconRgb = labToRgb(lChannel, reconstructed)
+                originalRgb = labToRgb(lChannel, original)
             elif modified.shape[1] == 1:  # L channel
-                reconRgb = self.abToRgb(reconstructed, modified)
-                originalRgb = self.abToRgb(original, modified)
+                reconRgb = labToRgb(modified, reconstructed)
+                originalRgb = labToRgb(modified, original)
             else:
-                fakeL = torch.ones_like(reconstructed[:, 0:1]) * 50.0
-                reconRgb = self.abToRgb(reconstructed, fakeL)
-                originalRgb = self.abToRgb(original, fakeL)
+                fakeL = torch.ones_like(reconstructed[:, 0:1]) * 0.5  # [0,1] range for PyTorch
+                reconRgb = labToRgb(fakeL, reconstructed)
+                originalRgb = labToRgb(fakeL, original)
         else:
             reconRgb = self.convertToRgb(reconstructed, self.target_channel)
             originalRgb = self.convertToRgb(original, self.target_channel)
@@ -572,6 +572,7 @@ class GeneratorColorizationLoss:
 
     def calculateColorfulnessLoss(self, reconstructed, original, modified):
         """Calculate colorfulness loss, converting to RGB if needed"""
+
         colorfulnessLoss = torch.tensor(0.0, device=reconstructed.device)
         colorfulnessRecon = torch.tensor(0.0, device=reconstructed.device)
         colorfulnessOriginal = torch.tensor(0.0, device=reconstructed.device)
@@ -580,15 +581,15 @@ class GeneratorColorizationLoss:
             if self.target_channel == "ab" and reconstructed.shape[1] == 2:
                 if modified.shape[1] == 3:  # RGB input
                     lChannel = self.rgbToLuminance(modified)
-                    reconRgb = self.abToRgb(reconstructed, lChannel)
-                    originalRgb = self.abToRgb(original, lChannel)
-                elif modified.shape[1] == 1:  # Already L channel
-                    reconRgb = self.abToRgb(reconstructed, modified)
-                    originalRgb = self.abToRgb(original, modified)
+                    reconRgb = labToRgb(lChannel, reconstructed)
+                    originalRgb = labToRgb(lChannel, original)
+                elif modified.shape[1] == 1:
+                    reconRgb = labToRgb(modified, reconstructed)
+                    originalRgb = labToRgb(modified, original)
                 else:
-                    fakeL = torch.ones_like(reconstructed[:, 0:1]) * 50.0
-                    reconRgb = self.abToRgb(reconstructed, fakeL)
-                    originalRgb = self.abToRgb(original, fakeL)
+                    fakeL = torch.ones_like(reconstructed[:, 0:1]) * 0.5  # [0,1] range
+                    reconRgb = labToRgb(fakeL, reconstructed)
+                    originalRgb = labToRgb(fakeL, original)
             else:
                 reconRgb = self.convertToRgb(reconstructed, self.target_channel)
                 originalRgb = self.convertToRgb(original, self.target_channel)
@@ -603,14 +604,6 @@ class GeneratorColorizationLoss:
                 colorfulnessLoss = torch.abs(colorfulnessOriginal - colorfulnessRecon)
 
         return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
-
-    def abToRgb(self, abChannels, lChannel):
-        """Convert AB channels to RGB using L channel"""
-        # Scale to expected ranges
-        lScaled = lChannel * 100.0  # [0, 100]
-        abScaled = abChannels * 255.0  # [0, 255]
-
-        return labToRgb(lScaled, abScaled)
 
     def convertToRgb(self, images, channelType):
         """Convert images to RGB based on channel type"""
