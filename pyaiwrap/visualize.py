@@ -5,27 +5,58 @@ from torchvision.utils import make_grid, save_image
 
 def labToRgb(lChannel, abChannels):
     """
-    Convert L and AB channels to RGB color space.
+    Convert L and AB channels to RGB color space using pure PyTorch operations.
 
     Args:
         lChannel: L channel tensor of shape (batch_size, 1, H, W) in range [0, 100]
         abChannels: AB channels tensor of shape (batch_size, 2, H, W) in range [0, 255]
 
     Returns:
-        RGB tensor in range [0, 1]
+        RGB tensor in range [0, 1] with full gradient support
     """
     batchSize, _, H, W = lChannel.shape
 
     lab = torch.cat([lChannel, abChannels], dim=1)  # (batch_size, 3, H, W)
-    lab = lab.permute(0, 2, 3, 1).cpu().numpy()  # (batch_size, H, W, 3)
 
-    rgbBatch = []
-    for i in range(batchSize):
-        labImg = lab[i]
-        rgbImg = _labToRgbSingle(labImg)
-        rgbBatch.append(torch.from_numpy(rgbImg).permute(2, 0, 1))
+    L, A, B = lab[:, 0:1, :, :], lab[:, 1:2, :, :], lab[:, 2:3, :, :]
 
-    return torch.stack(rgbBatch)
+    L = L  # L in [0, 100]
+    A = A - 128.0  # A was in [0, 255], convert back to [-128, 127]
+    B = B - 128.0  # B was in [0, 255], convert back to [-128, 127]
+
+    y = (L + 16.0) / 116.0
+    x = (A / 500.0) + y
+    z = y - (B / 200.0)
+
+    xyz = torch.cat([x, y, z], dim=1)
+
+    # Reverse nonlinearity
+    mask = xyz > 0.2068966
+    xyz = torch.where(mask, xyz ** 3, (xyz - 16.0/116.0) / 7.787)
+
+    # Multiply by reference white (D65)
+    reference_white = torch.tensor([0.95047, 1.0, 1.08883], 
+                                   device=xyz.device, dtype=xyz.dtype).view(1, 3, 1, 1)
+    xyz = xyz * reference_white
+
+    xyz_to_rgb = torch.tensor([
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252]
+    ], device=xyz.device, dtype=xyz.dtype)
+
+    # (B, 3, H, W) -> (B, H, W, 3)
+    xyz_permuted = xyz.permute(0, 2, 3, 1)
+    rgb_permuted = torch.matmul(xyz_permuted, xyz_to_rgb.t())
+    rgb = rgb_permuted.permute(0, 3, 1, 2)
+
+    # Apply gamma correction
+    mask = rgb > 0.0031308
+    rgb = torch.where(mask, 1.055 * (rgb ** (1/2.4)) - 0.055, 12.92 * rgb)
+
+    rgb = torch.clamp(rgb, 0.0, 1.0)
+
+    return rgb
 
 
 def _labToRgbSingle(lab):
@@ -42,9 +73,9 @@ def _labToRgbSingle(lab):
 
     L, A, B = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
 
-    L = L  # L is already in [0, 100]
-    A = A - 128  # A was in [0, 255], convert back to [-128, 127]
-    B = B - 128  # B was in [0, 255], convert back to [-128, 127]
+    L = L  # L in [0, 100]
+    A = A - 128  # A in [0, 255], convert to [-128, 127]
+    B = B - 128  # B in [0, 255], convert to [-128, 127]
 
     y = (L + 16) / 116
     x = (A / 500) + y
@@ -74,6 +105,27 @@ def _labToRgbSingle(lab):
     return rgb.astype(np.float32)
 
 
+def _labToRgbTensorNumpy(labTensor):
+    """
+    Convert LAB tensor to RGB tensor using numpy (for visualization only).
+
+    Args:
+        labTensor: LAB tensor of shape (batch_size, 3, H, W)
+
+    Returns:
+        RGB tensor in range [0, 1]
+    """
+    batchSize, _, H, W = labTensor.shape
+    labNp = labTensor.permute(0, 2, 3, 1).cpu().numpy()
+
+    rgbBatch = []
+    for i in range(batchSize):
+        rgbImg = _labToRgbSingle(labNp[i])
+        rgbBatch.append(torch.from_numpy(rgbImg).permute(2, 0, 1))
+
+    return torch.stack(rgbBatch)
+
+
 def convertToRgb(images, channelType, pairedImages=None):
     """
     Convert images to RGB based on channel type.
@@ -90,7 +142,6 @@ def convertToRgb(images, channelType, pairedImages=None):
         return images
 
     elif channelType == "luminance":
-        # If we have paired AB channels, combine to RGB
         if pairedImages is not None and pairedImages.shape[1] == 2:
             # L from [0,1] to [0,100] range
             lChannel = images * 100.0
@@ -109,7 +160,7 @@ def convertToRgb(images, channelType, pairedImages=None):
                 torch.zeros_like(images[:, 0:1]),  # Zero L channel
                 images  # AB channels
             ], dim=1)
-            return _labToRgbTensor(ab3ch)
+            return _labToRgbTensorNumpy(ab3ch)
 
     elif channelType == "R":
         return torch.cat([images, torch.zeros_like(images), torch.zeros_like(images)], dim=1)
@@ -122,27 +173,6 @@ def convertToRgb(images, channelType, pairedImages=None):
 
     else:
         return images.repeat(1, 3, 1, 1)
-
-
-def _labToRgbTensor(labTensor):
-    """
-    Convert LAB tensor to RGB tensor.
-
-    Args:
-        labTensor: LAB tensor of shape (batch_size, 3, H, W)
-
-    Returns:
-        RGB tensor in range [0, 1]
-    """
-    batchSize, _, H, W = labTensor.shape
-    labNp = labTensor.permute(0, 2, 3, 1).cpu().numpy()
-
-    rgbBatch = []
-    for i in range(batchSize):
-        rgbImg = _labToRgbSingle(labNp[i])
-        rgbBatch.append(torch.from_numpy(rgbImg).permute(2, 0, 1))
-
-    return torch.stack(rgbBatch)
 
 
 def visualizeReconstruction(originalImages: torch.Tensor,
