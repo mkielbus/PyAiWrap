@@ -500,7 +500,7 @@ class GeneratorColorizationLoss:
         )
 
         perceptualLoss = torch.tensor(0.0, device=reconstructionLoss.device)
-        if self.perceptualWeight > 0 and self.perceptualLossFn is not None:
+        if self.perceptual_weight > 0 and self.perceptual_loss_fn is not None:
             perceptualLoss = self.calculatePerceptualLoss(
                 reconstructedImages, originalImages, modifiedImages
             )
@@ -509,9 +509,9 @@ class GeneratorColorizationLoss:
             reconstructedImages, originalImages, modifiedImages
         )
 
-        totalLoss = (self.reconWeight * reconstructionLoss +
-                     self.perceptualWeight * perceptualLoss +
-                     self.colorfulnessWeight * colorfulnessLoss)
+        totalLoss = (self.recon_weight * reconstructionLoss +
+                     self.perceptual_weight * perceptualLoss +
+                     self.colorfulness_weight * colorfulnessLoss)
 
         if torch.is_grad_enabled():
             totalLoss.backward()
@@ -521,18 +521,18 @@ class GeneratorColorizationLoss:
 
         metrics.accumulate({
             'total_loss': totalLoss.item(),
-            'reconstruction_loss': reconstructionLoss.item() * self.reconWeight,
-            'perceptual_loss': perceptualLoss.item() * self.perceptualWeight,
-            'colorfulness_loss': colorfulnessLoss.item() * self.colorfulnessWeight,
+            'reconstruction_loss': reconstructionLoss.item() * self.recon_weight,
+            'perceptual_loss': perceptualLoss.item() * self.perceptual_weight,
+            'colorfulness_loss': colorfulnessLoss.item() * self.colorfulness_weight,
             'colorfulness_recon': colorfulnessRecon.item(),
             'colorfulness_original': colorfulnessOriginal.item()
         })
 
         return {
             'loss': totalLoss,
-            'reconstruction_loss': reconstructionLoss * self.reconWeight,
-            'perceptual_loss': perceptualLoss * self.perceptualWeight,
-            'colorfulness_loss': colorfulnessLoss * self.colorfulnessWeight,
+            'reconstruction_loss': reconstructionLoss * self.recon_weight,
+            'perceptual_loss': perceptualLoss * self.perceptual_weight,
+            'colorfulness_loss': colorfulnessLoss * self.colorfulness_weight,
             'reconstructed_images': reconstructedImages
         }
 
@@ -542,16 +542,16 @@ class GeneratorColorizationLoss:
 
     def calculatePerceptualLoss(self, reconstructed, original, modified):
         """Calculate perceptual loss, converting to RGB if needed"""
-        if self.targetChannel == "ab" and reconstructed.shape[1] == 2:
+        if self.target_channel == "ab" and reconstructed.shape[1] == 2:
             if modified.shape[1] == 1:  # L channel
                 reconRgb = self.abToRgb(reconstructed, modified)
                 originalRgb = self.abToRgb(original, modified)
             else:
-                reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
-                originalRgb = self.convertToRgb(original, self.targetChannel)
+                reconRgb = self.convertToRgb(reconstructed, self.target_channel)
+                originalRgb = self.convertToRgb(original, self.target_channel)
         else:
-            reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
-            originalRgb = self.convertToRgb(original, self.targetChannel)
+            reconRgb = self.convertToRgb(reconstructed, self.target_channel)
+            originalRgb = self.convertToRgb(original, self.target_channel)
 
         # LPIPS expects images in range [-1, 1]
         reconNormalized = reconRgb * 2.0 - 1.0
@@ -565,24 +565,24 @@ class GeneratorColorizationLoss:
         colorfulnessRecon = torch.tensor(0.0, device=reconstructed.device)
         colorfulnessOriginal = torch.tensor(0.0, device=reconstructed.device)
 
-        if self.colorfulnessWeight > 0:
+        if self.colorfulness_weight > 0:
             # Convert to RGB for colorfulness calculation
-            if self.targetChannel == "ab" and reconstructed.shape[1] == 2:
+            if self.target_channel == "ab" and reconstructed.shape[1] == 2:
                 if modified.shape[1] == 1:  # L channel
                     reconRgb = self.abToRgb(reconstructed, modified)
                     originalRgb = self.abToRgb(original, modified)
                 else:
-                    reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
-                    originalRgb = self.convertToRgb(original, self.targetChannel)
+                    reconRgb = self.convertToRgb(reconstructed, self.target_channel)
+                    originalRgb = self.convertToRgb(original, self.target_channel)
             else:
-                reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
-                originalRgb = self.convertToRgb(original, self.targetChannel)
+                reconRgb = self.convertToRgb(reconstructed, self.target_channel)
+                originalRgb = self.convertToRgb(original, self.target_channel)
 
             colorfulnessRecon = calculateColorfulnessLoss(reconRgb)
             colorfulnessOriginal = calculateColorfulnessLoss(originalRgb)
 
-            if self.colorfulnessTarget is not None:
-                target = torch.tensor(self.colorfulnessTarget, device=reconstructed.device)
+            if self.colorfulness_target is not None:
+                target = torch.tensor(self.colorfulness_target, device=reconstructed.device)
                 colorfulnessLoss = torch.abs(colorfulnessRecon - target)
             else:
                 colorfulnessLoss = torch.abs(colorfulnessOriginal - colorfulnessRecon)
