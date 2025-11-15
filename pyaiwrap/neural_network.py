@@ -1039,7 +1039,7 @@ class ColorMemoryTransformer(nn.Module):
         # Element-wise multiplication: both [batch_size, num_patches, memory_size]
         output = pixel_features * color_features  # [batch_size, num_patches, memory_size]
 
-        output = self.pixel_upsample(output)  # [batch_size, channels, h, w]
+        output = self.pixel_upsample(output)  # [batch_size, color_channels, h, w]
 
         output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
 
