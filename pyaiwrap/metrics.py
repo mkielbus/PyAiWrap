@@ -251,7 +251,8 @@ class GeneratorColorizationMetrics(BaseMetrics):
         self._use_colorfulness = use_colorfulness
         if self._use_colorfulness:
             metric_keys.extend(['colorfulness_loss',
-                                'colorfulness_recon'])
+                                'colorfulness_recon',
+                                'colorfulness_original'])
         self._use_perceptual_loss = use_perceptual_loss
         if self._use_perceptual_loss:
             metric_keys.append("perceptual_loss")
@@ -279,7 +280,8 @@ class GeneratorColorizationMetrics(BaseMetrics):
             print(f"Epoch {epoch} [{phase_label}]: {' | '.join(loss_parts)}")
 
             if self._use_colorfulness:
-                print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}")
+                print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}, "
+                      f"Colorfulness - Original: {metrics_dict['colorfulness_original']:.2f}")
 
         if self._history['val']:
             best_total_loss = min(entry['total_loss'] for entry in self._history['val'])

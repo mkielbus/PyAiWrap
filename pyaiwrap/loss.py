@@ -502,9 +502,11 @@ class GeneratorColorizationLoss:
 
         colorfulness_loss = torch.tensor(0.0, device=reconstruction_loss.device)
         colorfulness_recon = torch.tensor(0.0, device=reconstruction_loss.device)
+        colorfulness_original = torch.tensor(0.0, device=reconstruction_loss.device)
 
         if self.colorfulness_weight > 0:
             colorfulness_recon = calculateColorfulnessLoss(reconstructed_images)
+            colorfulness_original = calculateColorfulnessLoss(original_images)
             if self.colorfulness_target is not None:
                 target = torch.tensor(self.colorfulness_target, device=reconstructed_images.device)
                 colorfulness_loss = torch.abs(colorfulness_recon - target)
@@ -526,7 +528,8 @@ class GeneratorColorizationLoss:
             'reconstruction_loss': reconstruction_loss.item()*self.recon_weight,
             'perceptual_loss': perceptual_loss.item()*self.perceptual_weight,
             'colorfulness_loss': colorfulness_loss.item()*self.colorfulness_weight,
-            'colorfulness_recon': colorfulness_recon.item()
+            'colorfulness_recon': colorfulness_recon.item(),
+            'colorfulness_original': colorfulness_original.item()
         })
 
         return {
