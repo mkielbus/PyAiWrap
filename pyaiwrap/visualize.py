@@ -40,9 +40,15 @@ def convertToRgb(images: torch.Tensor,
         else:
             # Show L as grayscale
             if input_range == "zero_one":
-                return images.repeat(1, 3, 1, 1)
+                if images.shape[1] == 1:
+                    return images.repeat(1, 3, 1, 1)
+                else:
+                    return images
             else:
-                return (images / 100.0).repeat(1, 3, 1, 1)
+                if images.shape[1] == 1:
+                    return (images / 100.0).repeat(1, 3, 1, 1)
+                else:
+                    return images / 100.0
 
     elif channel_type == "AB":
         if paired_images is not None and paired_images.shape[1] == 1:
