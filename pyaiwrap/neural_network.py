@@ -1276,35 +1276,40 @@ class UNetWithSkipConnections(nn.Module):
 
     def __init__(self, layers_config: List[Dict[str, Any]]):
         super().__init__()
-        self._layers = nn.ModuleList()
-        self._encoder_blocks = {}
-        self._decoder_blocks = {}
+        self.encoder_blocks = nn.ModuleDict()
+        self.decoder_blocks = nn.ModuleDict()
+        self.other_layers = nn.ModuleList()
+        self.bottleneck = None
 
         for layer_config in layers_config:
             layer_type = layer_config["type"]
             params = layer_config["params"]
 
             if layer_type == "UNetEncoderBlock":
-                block_name = params.get("block_name", f"enc_{len(self._encoder_blocks)}")
-                layer = UNetEncoderBlock(**params)
-                self._encoder_blocks[block_name] = layer
-                self._layers.append(layer)
+                block_name = params.get("block_name", f"enc_{len(self.encoder_blocks)}")
+                self.encoder_blocks[block_name] = UNetEncoderBlock(**params)
             elif layer_type == "UNetDecoderBlock":
-                block_name = params.get("block_name", f"dec_{len(self._decoder_blocks)}")
-                layer = UNetDecoderBlock(**params)
-                self._decoder_blocks[block_name] = layer
-                self._layers.append(layer)
+                block_name = params.get("block_name", f"dec_{len(self.decoder_blocks)}")
+                self.decoder_blocks[block_name] = UNetDecoderBlock(**params)
+            elif layer_type == "UNetBottleneck":
+                self.bottleneck = UNetBottleneck(**params)
             else:
-                self._layers.append(NeuralNetworkLayer(layer_config))
+                self.other_layers.append(NeuralNetworkLayer(layer_config))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         encoder_features = {}
-        for layer in self._layers:
-            if isinstance(layer, UNetEncoderBlock):
-                x = layer(x)
-                encoder_features[layer._block_name] = layer._skip_features
-            elif isinstance(layer, UNetDecoderBlock):
-                x = layer(x, encoder_features)
-            else:
-                x = layer(x)
+
+        for name, encoder_block in self.encoder_blocks.items():
+            x = encoder_block(x)
+            encoder_features[name] = encoder_block._skip_features
+
+        if self.bottleneck is not None:
+            x = self.bottleneck(x)
+
+        for name, decoder_block in self.decoder_blocks.items():
+            x = decoder_block(x, encoder_features)
+
+        for layer in self.other_layers:
+            x = layer(x)
+
         return x
