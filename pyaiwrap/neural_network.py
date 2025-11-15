@@ -1336,8 +1336,8 @@ class MultiScaleScaledRefinement(nn.Module):
             nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
         )
 
-        self.high_freq_scale = nn.Parameter(torch.tensor(0.05))
-        self.low_freq_scale = nn.Parameter(torch.tensor(0.05))
+        self.high_freq_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.05)  # [1, 3, 1, 1]
+        self.low_freq_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.05)   # [1, 3, 1, 1]
 
     def forward(self, x):
         identity = x
