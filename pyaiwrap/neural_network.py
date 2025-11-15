@@ -1315,20 +1315,36 @@ class UNetWithSkipConnections(nn.Module):
         return x
 
 
-class ResidualRefinement(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=8):
+class MultiScaleScaledRefinement(nn.Module):
+    def __init__(self, in_channels=3, hidden_channels=32):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.InstanceNorm2d(hidden_channels)
-        self.activation = nn.GELU()
-        self.conv2 = nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
-        self.dropout = nn.Dropout(0.3)
+
+        self.high_freq_path = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+        )
+
+        self.low_freq_path = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, stride=2),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+        )
+
+        self.high_freq_scale = nn.Parameter(torch.tensor(0.05))
+        self.low_freq_scale = nn.Parameter(torch.tensor(0.05))
 
     def forward(self, x):
         identity = x
-        out = self.conv1(x)
-        out = self.norm1(out)
-        out = self.activation(out)
-        out = self.dropout(out)
-        out = self.conv2(out)
-        return torch.clamp(identity + out * 0.1, 0, 1)
+
+        high_freq_corr = self.high_freq_path(x) * self.high_freq_scale
+        low_freq_corr = self.low_freq_path(x) * self.low_freq_scale
+
+        total_correction = high_freq_corr + low_freq_corr
+
+        return torch.clamp(identity + total_correction, 0, 1)
