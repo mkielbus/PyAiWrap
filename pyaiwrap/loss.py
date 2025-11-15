@@ -428,6 +428,7 @@ class GeneratorColorizationLoss:
     def __init__(
         self,
         reconstruction_loss_fn: nn.Module = nn.MSELoss(),
+        recon_weight: float = 1.0,
         perceptual_weight: float = 0.0,
         colorfulness_weight: float = 0.0,
         colorfulness_target: Optional[float] = None,
@@ -448,6 +449,7 @@ class GeneratorColorizationLoss:
             device: Device to place LPIPS network on
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
+        self.recon_weight = recon_weight
         self.perceptual_weight = perceptual_weight
         self.colorfulness_weight = colorfulness_weight
         self.colorfulness_target = colorfulness_target
@@ -511,7 +513,7 @@ class GeneratorColorizationLoss:
             else:
                 colorfulness_loss = 1 - torch.abs(colorfulness_original)/100
 
-        total_loss = (reconstruction_loss +
+        total_loss = (self.recon_weight*reconstruction_loss +
                       self.perceptual_weight * perceptual_loss +
                       self.colorfulness_weight * colorfulness_loss)
 
@@ -523,7 +525,7 @@ class GeneratorColorizationLoss:
 
         metrics.accumulate({
             'total_loss': total_loss.item(),
-            'reconstruction_loss': reconstruction_loss.item(),
+            'reconstruction_loss': reconstruction_loss.item()*self.recon_weight,
             'perceptual_loss': perceptual_loss.item()*self.perceptual_weight,
             'colorfulness_loss': colorfulness_loss.item()*self.colorfulness_weight,
             'colorfulness_recon': colorfulness_recon.item(),

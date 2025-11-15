@@ -859,7 +859,9 @@ class ColorMemoryTransformer(nn.Module):
             embed_dim=embed_dim
         )
 
-        self.color_memory = nn.Parameter(torch.zeros(memory_size, embed_dim))  # [K, C]
+        self.color_memory = nn.Embedding(memory_size, embed_dim)  # [K, C]
+
+        nn.init.zeros_(self.color_memory.weight)
 
         self.pixel_decoder_layers = nn.ModuleList([
             TransformerBlock(
@@ -990,7 +992,9 @@ class ColorMemoryTransformer(nn.Module):
         #     target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
         #     target_patches = target_patches + target_pos_encoding
 
-        #     batch_color_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        #     memory_indices = torch.arange(self.memory_size, device=img.device).unsqueeze(0).expand(batch_size, -1)
+
+        #     updated_memory = self.color_memory(memory_indices)  # [batch_size, memory_size, embed_dim]
 
         #     updated_memory = self.memory_learning_attention(
         #         query=batch_color_memory,
@@ -998,7 +1002,9 @@ class ColorMemoryTransformer(nn.Module):
         #         value=target_patches
         #     )
         # else:
-        updated_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        memory_indices = torch.arange(self.memory_size, device=img.device).unsqueeze(0).expand(batch_size, -1)
+
+        updated_memory = self.color_memory(memory_indices)  # [batch_size, memory_size, embed_dim]
 
         color_decoder_input = updated_memory
 

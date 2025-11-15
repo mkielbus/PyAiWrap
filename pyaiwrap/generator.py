@@ -26,6 +26,8 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "LEARNING_RATE": 0.0001,
         "WEIGHT_DECAY": 0.01,
         "USE_ADAMW": True,
+        "B1": 0.9,
+        "B2": 0.999,
 
         "SCHEDULER_TYPE": "cosine_warm_restarts",  # Options: exponential, cosine_warm_restarts, onecycle, reduce_on_plateau, cosine, step
         "GAMMA": 0.99,
@@ -56,6 +58,7 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "VISUALIZE_EVERY": 5,
         "GRADIENT_CLIP": 1.0,
 
+        "RECON_WEIGHT": 1.0,
         "PERCEPTUAL_WEIGHT": 0.0,
         "USE_LPIPS": False,
         "LPIPS_NET": "alex",
