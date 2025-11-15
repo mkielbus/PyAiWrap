@@ -840,7 +840,6 @@ class ColorMemoryTransformer(nn.Module):
 
         self.embed_dim = embed_dim
         self.patch_size = patch_size
-        self.target_channel = target_channel
         self.memory_size = memory_size
         self.num_layers = num_layers
 
@@ -848,12 +847,6 @@ class ColorMemoryTransformer(nn.Module):
             raise ValueError("target_channel must be 'red', 'green', or 'blue'")
 
         self.luminance_embed = PatchEmbed(
-            patch_size=patch_size,
-            in_channels=1,
-            embed_dim=embed_dim
-        )
-
-        self.target_channel_embed = PatchEmbed(
             patch_size=patch_size,
             in_channels=1,
             embed_dim=embed_dim
@@ -960,15 +953,8 @@ class ColorMemoryTransformer(nn.Module):
 
         if channels == 3:
             luminance = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
-            if self.target_channel == 'red':
-                target_channel_img = img[:, 0:1]
-            elif self.target_channel == 'green':
-                target_channel_img = img[:, 1:2]
-            else:
-                target_channel_img = img[:, 2:3]
         elif channels == 1:
             luminance = img
-            target_channel_img = None
         else:
             raise ValueError("Input must be 1-channel (luminance) or 3-channel (RGB)")
 
@@ -987,21 +973,6 @@ class ColorMemoryTransformer(nn.Module):
 
         pixel_features = self.pixel_upsample(final_pixel_output)  # [batch_size, embed_dim, h, w]
 
-        # if self.training and target_channel_img is not None:
-        #     target_patches = self.target_channel_embed(target_channel_img)
-        #     target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
-        #     target_patches = target_patches + target_pos_encoding
-
-        #     memory_indices = torch.arange(self.memory_size, device=img.device).unsqueeze(0).expand(batch_size, -1)
-
-        #     updated_memory = self.color_memory(memory_indices)  # [batch_size, memory_size, embed_dim]
-
-        #     updated_memory = self.memory_learning_attention(
-        #         query=batch_color_memory,
-        #         key=target_patches,
-        #         value=target_patches
-        #     )
-        # else:
         memory_indices = torch.arange(self.memory_size, device=img.device).unsqueeze(0).expand(batch_size, -1)
 
         updated_memory = self.color_memory(memory_indices)  # [batch_size, memory_size, embed_dim]

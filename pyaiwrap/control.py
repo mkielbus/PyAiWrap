@@ -9,7 +9,7 @@ class GeneratorControlFunc:
     Callable class for visualizing generator reconstruction during training.
     """
 
-    def __init__(self, target_channel: str = "RGB"):
+    def __init__(self, target_channel: str = "RGB", input_channel: str = "RGB"):
         """
         Initialize the control function with target channel.
 
@@ -17,6 +17,7 @@ class GeneratorControlFunc:
             target_channel: Target channel for single-channel models ("R", "G", "B", or "RGB")
         """
         self.target_channel = target_channel
+        self.input_channel = input_channel
 
     def __call__(
         self,
@@ -62,7 +63,8 @@ class GeneratorControlFunc:
             launch_number=launch_number,
             hyperparams_id=hyperparams_id,
             num_images=8,
-            target_channel=self.target_channel
+            target_channel=self.target_channel,
+            input_channel=self.input_channel
         )
 
         visualizeReconstruction(
@@ -75,7 +77,8 @@ class GeneratorControlFunc:
             launch_number=launch_number,
             hyperparams_id=hyperparams_id,
             num_images=8,
-            target_channel=self.target_channel
+            target_channel=self.target_channel,
+            input_channel=self.input_channel
         )
 
 

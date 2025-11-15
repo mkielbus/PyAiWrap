@@ -1,5 +1,6 @@
 import torch
 import torchvision.transforms.functional as TF
+from torchvision import transforms
 from PIL import Image
 import numpy as np
 from abc import ABC, abstractmethod
@@ -246,3 +247,206 @@ class ExtractBlueChannelTo3Channel(ExtractChannelTo3Channel):
     """Extract blue channel and create 3-channel image with format [0, 0, blue]"""
     def __init__(self):
         super().__init__(channel_index=2)
+
+
+class RGBToLab(ImageTransform):
+    """Convert RGB image to LAB color space and return as tensor"""
+
+    def __init__(self):
+        """Initialize RGB to LAB conversion"""
+
+    def __call__(self, img):
+        """Convert RGB image to LAB color space and return as tensor"""
+        if isinstance(img, torch.Tensor):
+            return self._handleTensor(img)
+        elif isinstance(img, np.ndarray):
+            return self._handleNumpy(img)
+        elif isinstance(img, Image.Image):
+            return self._handlePil(img)
+        else:
+            raise TypeError(f"Unsupported type: {type(img)}")
+
+    def _handleTensor(self, img):
+        """Convert tensor from RGB to LAB"""
+        if img.shape[0] != 3:
+            raise ValueError("Input tensor must have 3 channels for RGB to LAB conversion")
+
+        # Assuming tensor is in range [0, 1] and shape [C, H, W]
+        rgb = img.permute(1, 2, 0).numpy()  # Convert to HWC for conversion
+        lab = self._rgb_to_lab(rgb)
+        return torch.from_numpy(lab).permute(2, 0, 1).float()  # Convert back to CHW and ensure float
+
+    def _handleNumpy(self, img):
+        """Convert numpy array from RGB to LAB and return as tensor"""
+        if img.ndim != 3 or img.shape[2] != 3:
+            raise ValueError("Input array must have 3 channels for RGB to LAB conversion")
+
+        lab = self._rgb_to_lab(img)
+        return torch.from_numpy(lab).permute(2, 0, 1).float()
+
+    def _handlePil(self, img):
+        """Convert PIL Image from RGB to LAB and return as tensor"""
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        rgb_array = np.array(img)
+        lab_array = self._rgb_to_lab(rgb_array)
+        return torch.from_numpy(lab_array).permute(2, 0, 1).float()
+
+    def _rgb_to_lab(self, rgb):
+        """Convert RGB to LAB color space - returns float array"""
+        rgb = rgb.astype(np.float32) / 255.0
+
+        mask = rgb > 0.04045
+        rgb[mask] = ((rgb[mask] + 0.055) / 1.055) ** 2.4
+        rgb[~mask] = rgb[~mask] / 12.92
+
+        xyz = np.dot(rgb, self._get_rgb_to_xyz_matrix().T)
+
+        xyz = xyz / self._get_reference_white()
+
+        mask = xyz > 0.008856
+        xyz[mask] = xyz[mask] ** (1/3)
+        xyz[~mask] = (7.787 * xyz[~mask]) + (16 / 116)
+
+        x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+
+        L = (116 * y) - 16
+        a = 500 * (x - y)
+        b = 200 * (y - z)
+
+        L = np.clip(L, 0, 100)
+        a = np.clip(a + 128, 0, 255)
+        b = np.clip(b + 128, 0, 255)
+
+        lab = np.stack([L, a, b], axis=-1).astype(np.float32)
+        return lab
+
+    def _get_rgb_to_xyz_matrix(self):
+        """Get RGB to XYZ conversion matrix (sRGB, D65)"""
+        return np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ])
+
+    def _get_reference_white(self):
+        """Get reference white point (D65)"""
+        return np.array([0.95047, 1.0, 1.08883])
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}()"
+
+
+class ExtractABChannels(ImageTransform):
+    """Extract A and B channels from LAB color space - expects tensor input"""
+
+    def __init__(self, num_output_channels: int = 2):
+        """
+        Initialize AB channels extraction.
+
+        Args:
+            num_output_channels: Number of output channels (2 or 3)
+        """
+        if num_output_channels not in [2, 3]:
+            raise ValueError("num_output_channels must be 2 or 3")
+        self.num_output_channels = num_output_channels
+
+    def __call__(self, img):
+        """Extract A and B channels from LAB tensor"""
+        if isinstance(img, torch.Tensor):
+            return self._handleTensor(img)
+        else:
+            if isinstance(img, Image.Image):
+                img = transforms.ToTensor()(img)
+            elif isinstance(img, np.ndarray):
+                img = torch.from_numpy(img).permute(2, 0, 1).float()
+            return self._handleTensor(img)
+
+    def _handleTensor(self, img):
+        """Extract AB channels from tensor in LAB format"""
+        if img.dim() != 3:
+            raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
+
+        if img.shape[0] == 1:
+            raise ValueError("Cannot extract AB channels from single channel image")
+
+        if img.shape[0] == 2:
+            # Already 2 channels, assume it's AB
+            ab_channels = img
+        elif img.shape[0] == 3:
+            # LAB format with 3 channels
+            # Extract channels 1 and 2 (A and B)
+            ab_channels = img[1:3, :, :]
+        else:
+            raise ValueError(f"Unsupported tensor shape: {img.shape}")
+
+        if self.num_output_channels == 3:
+            # Add zero channel for L to make it 3-channel
+            zeros = torch.zeros_like(ab_channels[0:1, :, :])
+            return torch.cat([zeros, ab_channels], dim=0)
+        else:
+            return ab_channels
+
+    def _handleNumpy(self, img):
+        """Extract AB channels from numpy array - convert to tensor"""
+        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+        return self._handleTensor(img_tensor)
+
+    def _handlePil(self, img):
+        """Extract AB channels from PIL Image - convert to tensor"""
+        img_tensor = transforms.ToTensor()(img)
+        return self._handleTensor(img_tensor)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(num_output_channels={self.num_output_channels})"
+
+
+class ExtractABChannelsTo3Channel(ImageTransform):
+    """Extract A and B channels and create 3-channel LAB tensor with zeros in L channel"""
+
+    def __init__(self):
+        """Initialize AB channels extraction to 3-channel LAB format"""
+
+    def __call__(self, img):
+        """Extract AB channels and create 3-channel LAB tensor"""
+        if isinstance(img, torch.Tensor):
+            return self._handleTensor(img)
+        else:
+            # Convert to tensor if needed
+            if isinstance(img, Image.Image):
+                img = transforms.ToTensor()(img)
+            elif isinstance(img, np.ndarray):
+                img = torch.from_numpy(img).permute(2, 0, 1).float()
+            return self._handleTensor(img)
+
+    def _handleTensor(self, img):
+        """Extract AB channels from tensor and create 3-channel LAB output"""
+        if img.dim() != 3:
+            raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
+
+        if img.shape[0] == 1:
+            raise ValueError("Cannot extract AB channels from single channel image")
+
+        if img.shape[0] == 2:
+            ab_channels = img
+        elif img.shape[0] == 3:
+            ab_channels = img[1:3, :, :]
+        else:
+            raise ValueError(f"Unsupported tensor shape: {img.shape}")
+
+        zeros = torch.zeros_like(ab_channels[0:1, :, :])
+        return torch.cat([zeros, ab_channels], dim=0)
+
+    def _handleNumpy(self, img):
+        """Handle numpy array - convert to tensor"""
+        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+        return self._handleTensor(img_tensor)
+
+    def _handlePil(self, img):
+        """Handle PIL Image - convert to tensor"""
+        img_tensor = transforms.ToTensor()(img)
+        return self._handleTensor(img_tensor)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}()"
