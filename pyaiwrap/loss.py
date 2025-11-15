@@ -542,13 +542,19 @@ class GeneratorColorizationLoss:
 
     def calculatePerceptualLoss(self, reconstructed, original, modified):
         """Calculate perceptual loss, converting to RGB if needed"""
+
         if self.target_channel == "ab" and reconstructed.shape[1] == 2:
-            if modified.shape[1] == 1:  # L channel
+            if modified.shape[1] == 3:  # RGB input
+                lChannel = self.rgbToLuminance(modified)
+                reconRgb = self.abToRgb(reconstructed, lChannel)
+                originalRgb = self.abToRgb(original, lChannel)
+            elif modified.shape[1] == 1:  # L channel
                 reconRgb = self.abToRgb(reconstructed, modified)
                 originalRgb = self.abToRgb(original, modified)
             else:
-                reconRgb = self.convertToRgb(reconstructed, self.target_channel)
-                originalRgb = self.convertToRgb(original, self.target_channel)
+                fakeL = torch.ones_like(reconstructed[:, 0:1]) * 50.0
+                reconRgb = self.abToRgb(reconstructed, fakeL)
+                originalRgb = self.abToRgb(original, fakeL)
         else:
             reconRgb = self.convertToRgb(reconstructed, self.target_channel)
             originalRgb = self.convertToRgb(original, self.target_channel)
@@ -558,6 +564,11 @@ class GeneratorColorizationLoss:
         originalNormalized = originalRgb * 2.0 - 1.0
 
         return self.perceptual_loss_fn(reconNormalized, originalNormalized).mean()
+
+    def rgbToLuminance(self, rgbImages):
+        """Convert RGB to luminance (L channel) using standard weights"""
+        luminance = 0.299 * rgbImages[:, 0:1] + 0.587 * rgbImages[:, 1:2] + 0.114 * rgbImages[:, 2:3]
+        return luminance
 
     def calculateColorfulnessLoss(self, reconstructed, original, modified):
         """Calculate colorfulness loss, converting to RGB if needed"""
