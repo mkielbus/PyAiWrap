@@ -557,7 +557,7 @@ class GeneratorColorizationLoss:
         reconNormalized = reconRgb * 2.0 - 1.0
         originalNormalized = originalRgb * 2.0 - 1.0
 
-        return self.perceptualLossFn(reconNormalized, originalNormalized).mean()
+        return self.perceptual_loss_fn(reconNormalized, originalNormalized).mean()
 
     def calculateColorfulnessLoss(self, reconstructed, original, modified):
         """Calculate colorfulness loss, converting to RGB if needed"""
