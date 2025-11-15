@@ -54,31 +54,31 @@ class GeneratorControlFunc:
             val_reconstructed = generator(val_modified)
 
         visualizeReconstruction(
-            original_images=train_original,
-            modified_images=train_modified,
-            reconstructed_images=train_reconstructed,
+            originalImages=train_original,
+            modifiedImages=train_modified,
+            reconstructedImages=train_reconstructed,
             epoch=epoch,
-            save_path=diagrams_path,
-            model_type=f"train_{model_type}",
-            launch_number=launch_number,
-            hyperparams_id=hyperparams_id,
-            num_images=8,
-            target_channel=self.target_channel,
-            input_channel=self.input_channel
+            savePath=diagrams_path,
+            modelType=f"train_{model_type}",
+            launchNumber=launch_number,
+            hyperparamsId=hyperparams_id,
+            numImages=8,
+            targetChannel=self.target_channel,
+            inputChannel=self.input_channel
         )
 
         visualizeReconstruction(
-            original_images=val_original,
-            modified_images=val_modified,
-            reconstructed_images=val_reconstructed,
+            originalImages=val_original,
+            modifiedImages=val_modified,
+            reconstructedImages=val_reconstructed,
             epoch=epoch,
-            save_path=diagrams_path,
-            model_type=f"val_{model_type}",
-            launch_number=launch_number,
-            hyperparams_id=hyperparams_id,
-            num_images=8,
-            target_channel=self.target_channel,
-            input_channel=self.input_channel
+            savePath=diagrams_path,
+            modelType=f"val_{model_type}",
+            launchNumber=launch_number,
+            hyperparamsId=hyperparams_id,
+            numImages=8,
+            targetChannel=self.target_channel,
+            inputChannel=self.input_channel
         )
 
 

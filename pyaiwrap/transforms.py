@@ -364,7 +364,6 @@ class ExtractABChannels(ImageTransform):
             return self._handleTensor(img)
 
     def _handleTensor(self, img):
-        """Extract AB channels from tensor in LAB format"""
         if img.dim() != 3:
             raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
 
@@ -372,17 +371,13 @@ class ExtractABChannels(ImageTransform):
             raise ValueError("Cannot extract AB channels from single channel image")
 
         if img.shape[0] == 2:
-            # Already 2 channels, assume it's AB
             ab_channels = img
         elif img.shape[0] == 3:
-            # LAB format with 3 channels
-            # Extract channels 1 and 2 (A and B)
-            ab_channels = img[1:3, :, :]
+            ab_channels = img[1:3, :, :] / 255.0
         else:
             raise ValueError(f"Unsupported tensor shape: {img.shape}")
 
         if self.num_output_channels == 3:
-            # Add zero channel for L to make it 3-channel
             zeros = torch.zeros_like(ab_channels[0:1, :, :])
             return torch.cat([zeros, ab_channels], dim=0)
         else:
