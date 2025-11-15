@@ -94,6 +94,23 @@ def convertToRgb(images: torch.Tensor,
         return images.repeat(1, 3, 1, 1)
 
 
+def detect_range(images, channel_type):
+    if channel_type in ["LAB", "AB"]:
+        # Check if values are in [0,1] range (not Kornia range)
+        if images.min() >= 0 and images.max() <= 1:
+            return "zero_one"
+        else:
+            return "kornia"
+    elif channel_type == "luminance":
+        # Check if L is in [0,1] range (not [0,100] range)
+        if images.min() >= 0 and images.max() <= 1:
+            return "zero_one"
+        else:
+            return "kornia"
+    else:
+        return "zero_one"
+
+
 def visualizeReconstruction(originalImages: torch.Tensor,
                             modifiedImages: torch.Tensor,
                             reconstructedImages: torch.Tensor,
@@ -105,7 +122,7 @@ def visualizeReconstruction(originalImages: torch.Tensor,
                             numImages: int = 8,
                             inputChannel: str = "RGB",
                             targetChannel: str = "RGB",
-                            input_range: str = "zero_one") -> None:
+                            input_range: str = "auto") -> None:  # CHANGE TO "auto"
     """
     Create visualization for various input/output channel combinations.
     """
@@ -115,6 +132,14 @@ def visualizeReconstruction(originalImages: torch.Tensor,
 
     actualNumImages = min(numImages, originalImages.shape[0])
 
+    if input_range == "auto":
+        original_range = detect_range(originalImages, targetChannel)
+        modified_range = detect_range(modifiedImages, inputChannel)
+        reconstructed_range = detect_range(reconstructedImages, targetChannel)
+
+    else:
+        original_range = modified_range = reconstructed_range = input_range
+
     is_colorization = (inputChannel == "luminance" and targetChannel == "AB")
     is_ab_from_rgb = (inputChannel == "RGB" and targetChannel == "AB")
     is_lab_reconstruction = (inputChannel == "RGB" and targetChannel == "LAB")
@@ -122,45 +147,38 @@ def visualizeReconstruction(originalImages: torch.Tensor,
 
     if is_colorization:
         # Colorization: L -> AB
-        # Original: RGB, Modified: L, Reconstructed: AB
-        originalRgb = convertToRgb(originalImages, "RGB", input_range=input_range)
-        modifiedRgb = convertToRgb(modifiedImages, "luminance", input_range=input_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, "AB", modifiedImages, input_range=input_range)
+        originalRgb = convertToRgb(originalImages, "RGB", input_range=original_range)
+        modifiedRgb = convertToRgb(modifiedImages, "luminance", input_range=modified_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, "AB", modifiedImages, input_range=reconstructed_range)
 
     elif is_ab_from_rgb:
         # AB prediction from RGB
-        # Original: AB, Modified: RGB, Reconstructed: AB
-        originalRgb = convertToRgb(originalImages, "AB", input_range=input_range)
-        modifiedRgb = convertToRgb(modifiedImages, "RGB", input_range=input_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, "AB", input_range=input_range)
+        originalRgb = convertToRgb(originalImages, "AB", input_range=original_range)
+        modifiedRgb = convertToRgb(modifiedImages, "RGB", input_range=modified_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, "AB", input_range=reconstructed_range)
 
     elif is_lab_reconstruction:
         # LAB reconstruction: RGB -> LAB
-        # Original: LAB, Modified: RGB, Reconstructed: LAB
-        originalRgb = convertToRgb(originalImages, "LAB", input_range=input_range)
-        modifiedRgb = convertToRgb(modifiedImages, "RGB", input_range=input_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, "LAB", input_range=input_range)
+        originalRgb = convertToRgb(originalImages, "LAB", input_range=original_range)
+        modifiedRgb = convertToRgb(modifiedImages, "RGB", input_range=modified_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, "LAB", input_range=reconstructed_range)
 
     elif is_single_channel and inputChannel == targetChannel:
-        # Single channel reconstruction (R->R, G->G, B->B)
-        originalRgb = convertToRgb(originalImages, targetChannel, input_range=input_range)
-        modifiedRgb = convertToRgb(modifiedImages, inputChannel, input_range=input_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, targetChannel, input_range=input_range)
+        # Single channel reconstruction
+        originalRgb = convertToRgb(originalImages, targetChannel, input_range=original_range)
+        modifiedRgb = convertToRgb(modifiedImages, inputChannel, input_range=modified_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, targetChannel, input_range=reconstructed_range)
 
     else:
-        # Generic case - handle all other combinations
-        originalRgb = convertToRgb(originalImages, targetChannel, input_range=input_range)
-        modifiedRgb = convertToRgb(modifiedImages, inputChannel, input_range=input_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, targetChannel, input_range=input_range)
+        originalRgb = convertToRgb(originalImages, targetChannel, input_range=original_range)
+        modifiedRgb = convertToRgb(modifiedImages, inputChannel, input_range=modified_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, targetChannel, input_range=reconstructed_range)
 
-    # NOW clamp the RGB images to [0,1] for saving
     originalRgb = torch.clamp(originalRgb, 0, 1)
     modifiedRgb = torch.clamp(modifiedRgb, 0, 1)
     reconstructedRgb = torch.clamp(reconstructedRgb, 0, 1)
 
-    # Stack vertically: original, modified, reconstructed
     comparison = torch.cat([originalRgb, modifiedRgb, reconstructedRgb], dim=0)
-
     grid = make_grid(comparison, nrow=actualNumImages, padding=2, normalize=False)
 
     os.makedirs(savePath, exist_ok=True)
