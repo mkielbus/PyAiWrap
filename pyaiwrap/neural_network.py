@@ -1315,36 +1315,34 @@ class UNetWithSkipConnections(nn.Module):
         return x
 
 
-class MultiScaleScaledRefinement(nn.Module):
+class DynamicSpatialWeights(nn.Module):
     def __init__(self, in_channels=3, hidden_channels=32):
         super().__init__()
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
 
-        self.high_freq_path = nn.Sequential(
+        self.weight_predictor = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)  # [B, hidden_channels, H, W]
         )
 
-        self.low_freq_path = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, stride=2),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
-        )
+        self.conv_in = nn.Conv2d(in_channels, hidden_channels, kernel_size=1)
+        self.conv_out = nn.Conv2d(hidden_channels, in_channels, kernel_size=1)
 
-        self.high_freq_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.05)  # [1, 3, 1, 1]
-        self.low_freq_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.05)   # [1, 3, 1, 1]
+        self.output_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.1)
 
     def forward(self, x):
         identity = x
 
-        high_freq_corr = self.high_freq_path(x) * self.high_freq_scale
-        low_freq_corr = self.low_freq_path(x) * self.low_freq_scale
+        hidden = self.conv_in(x)  # [B, hidden_channels, H, W]
 
-        total_correction = high_freq_corr + low_freq_corr
+        spatial_weights = self.weight_predictor(x)  # [B, hidden_channels, H, W]
 
-        return torch.clamp(identity + total_correction, 0, 1)
+        weighted_hidden = hidden * spatial_weights
+
+        correction = self.conv_out(weighted_hidden)
+
+        return torch.clamp(identity + correction * self.output_scale, 0, 1)
