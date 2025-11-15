@@ -5,6 +5,7 @@ import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
 from .neural_network import ColorizationTransformerNet
+from visualize import labToRgb
 
 
 class LPIPSLoss(nn.Module):
@@ -434,7 +435,9 @@ class GeneratorColorizationLoss:
         colorfulness_target: Optional[float] = None,
         use_lpips: bool = False,
         lpips_net: str = 'alex',
-        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+        input_channel: str = "RGB",
+        target_channel: str = "RGB"
     ):
         """
         Initialize generator loss function.
@@ -455,6 +458,8 @@ class GeneratorColorizationLoss:
         self.colorfulness_target = colorfulness_target
         self.use_lpips = use_lpips
         self.device = device
+        self.input_channel = input_channel
+        self.target_channel = target_channel
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
@@ -470,7 +475,7 @@ class GeneratorColorizationLoss:
         models: Dict[str, nn.Module],
         batch: Tuple,
         metrics: object,
-        gradient_clip: Optional[float] = None
+        gradientClip: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Calculate generator loss and update metrics.
@@ -479,7 +484,7 @@ class GeneratorColorizationLoss:
             models: Dictionary containing the generator model (e.g., {'generator': generator_model})
             batch: Tuple of (modified_images, original_images)
             metrics: Metrics object with accumulate() method
-            gradient_clip: Gradient clipping value (None to disable)
+            gradientClip: Gradient clipping value (None to disable)
 
         Returns:
             Dictionary with 'loss' key containing the total loss tensor
@@ -488,54 +493,122 @@ class GeneratorColorizationLoss:
             raise ValueError("models dictionary must contain 'generator' key")
         generator = models['generator']
 
-        modified_images, original_images = batch[0], batch[1]
-        reconstructed_images = generator(modified_images)
-        reconstruction_loss = self.reconstruction_loss_fn(reconstructed_images, original_images)
+        modifiedImages, originalImages = batch[0], batch[1]
+        reconstructedImages = generator(modifiedImages)
 
-        # Perceptual loss (LPIPS)
-        perceptual_loss = torch.tensor(0.0, device=reconstruction_loss.device)
-        if self.perceptual_weight > 0 and self.perceptual_loss_fn is not None:
-            # LPIPS expects images in range [-1, 1]
-            recon_normalized = reconstructed_images * 2.0 - 1.0
-            original_normalized = original_images * 2.0 - 1.0
-            perceptual_loss = self.perceptual_loss_fn(recon_normalized, original_normalized).mean()
+        reconstructionLoss = self.calculateReconstructionLoss(
+            reconstructedImages, originalImages, modifiedImages
+        )
 
-        colorfulness_loss = torch.tensor(0.0, device=reconstruction_loss.device)
-        colorfulness_recon = torch.tensor(0.0, device=reconstruction_loss.device)
-        colorfulness_original = torch.tensor(0.0, device=reconstruction_loss.device)
+        perceptualLoss = torch.tensor(0.0, device=reconstructionLoss.device)
+        if self.perceptualWeight > 0 and self.perceptualLossFn is not None:
+            perceptualLoss = self.calculatePerceptualLoss(
+                reconstructedImages, originalImages, modifiedImages
+            )
 
-        if self.colorfulness_weight > 0:
-            colorfulness_recon = calculateColorfulnessLoss(reconstructed_images)
-            colorfulness_original = calculateColorfulnessLoss(original_images)
-            if self.colorfulness_target is not None:
-                target = torch.tensor(self.colorfulness_target, device=reconstructed_images.device)
-                colorfulness_loss = torch.abs(colorfulness_recon - target)
-            else:
-                colorfulness_loss = torch.abs(colorfulness_original - colorfulness_recon)
+        colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal = self.calculateColorfulnessLoss(
+            reconstructedImages, originalImages, modifiedImages
+        )
 
-        total_loss = (self.recon_weight*reconstruction_loss +
-                      self.perceptual_weight * perceptual_loss +
-                      self.colorfulness_weight * colorfulness_loss)
+        totalLoss = (self.reconWeight * reconstructionLoss +
+                     self.perceptualWeight * perceptualLoss +
+                     self.colorfulnessWeight * colorfulnessLoss)
 
         if torch.is_grad_enabled():
-            total_loss.backward()
+            totalLoss.backward()
 
-            if gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradient_clip)
+            if gradientClip is not None:
+                torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradientClip)
 
         metrics.accumulate({
-            'total_loss': total_loss.item(),
-            'reconstruction_loss': reconstruction_loss.item()*self.recon_weight,
-            'perceptual_loss': perceptual_loss.item()*self.perceptual_weight,
-            'colorfulness_loss': colorfulness_loss.item()*self.colorfulness_weight,
-            'colorfulness_recon': colorfulness_recon.item(),
-            'colorfulness_original': colorfulness_original.item()
+            'total_loss': totalLoss.item(),
+            'reconstruction_loss': reconstructionLoss.item() * self.reconWeight,
+            'perceptual_loss': perceptualLoss.item() * self.perceptualWeight,
+            'colorfulness_loss': colorfulnessLoss.item() * self.colorfulnessWeight,
+            'colorfulness_recon': colorfulnessRecon.item(),
+            'colorfulness_original': colorfulnessOriginal.item()
         })
 
         return {
-            'loss': total_loss,
-            'reconstruction_loss': reconstruction_loss*self.recon_weight,
-            'perceptual_loss': perceptual_loss*self.perceptual_weight,
-            'colorfulness_loss': colorfulness_loss*self.colorfulness_weight,
-            'reconstructed_images': reconstructed_images
+            'loss': totalLoss,
+            'reconstruction_loss': reconstructionLoss * self.reconWeight,
+            'perceptual_loss': perceptualLoss * self.perceptualWeight,
+            'colorfulness_loss': colorfulnessLoss * self.colorfulnessWeight,
+            'reconstructed_images': reconstructedImages
         }
+
+    def calculateReconstructionLoss(self, reconstructed, original, modified):
+        """Calculate reconstruction loss based on channel types"""
+        return self.reconstructionLossFn(reconstructed, original)
+
+    def calculatePerceptualLoss(self, reconstructed, original, modified):
+        """Calculate perceptual loss, converting to RGB if needed"""
+        if self.targetChannel == "ab" and reconstructed.shape[1] == 2:
+            if modified.shape[1] == 1:  # L channel
+                reconRgb = self.abToRgb(reconstructed, modified)
+                originalRgb = self.abToRgb(original, modified)
+            else:
+                reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
+                originalRgb = self.convertToRgb(original, self.targetChannel)
+        else:
+            reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
+            originalRgb = self.convertToRgb(original, self.targetChannel)
+
+        # LPIPS expects images in range [-1, 1]
+        reconNormalized = reconRgb * 2.0 - 1.0
+        originalNormalized = originalRgb * 2.0 - 1.0
+
+        return self.perceptualLossFn(reconNormalized, originalNormalized).mean()
+
+    def calculateColorfulnessLoss(self, reconstructed, original, modified):
+        """Calculate colorfulness loss, converting to RGB if needed"""
+        colorfulnessLoss = torch.tensor(0.0, device=reconstructed.device)
+        colorfulnessRecon = torch.tensor(0.0, device=reconstructed.device)
+        colorfulnessOriginal = torch.tensor(0.0, device=reconstructed.device)
+
+        if self.colorfulnessWeight > 0:
+            # Convert to RGB for colorfulness calculation
+            if self.targetChannel == "ab" and reconstructed.shape[1] == 2:
+                if modified.shape[1] == 1:  # L channel
+                    reconRgb = self.abToRgb(reconstructed, modified)
+                    originalRgb = self.abToRgb(original, modified)
+                else:
+                    reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
+                    originalRgb = self.convertToRgb(original, self.targetChannel)
+            else:
+                reconRgb = self.convertToRgb(reconstructed, self.targetChannel)
+                originalRgb = self.convertToRgb(original, self.targetChannel)
+
+            colorfulnessRecon = calculateColorfulnessLoss(reconRgb)
+            colorfulnessOriginal = calculateColorfulnessLoss(originalRgb)
+
+            if self.colorfulnessTarget is not None:
+                target = torch.tensor(self.colorfulnessTarget, device=reconstructed.device)
+                colorfulnessLoss = torch.abs(colorfulnessRecon - target)
+            else:
+                colorfulnessLoss = torch.abs(colorfulnessOriginal - colorfulnessRecon)
+
+        return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
+
+    def abToRgb(self, abChannels, lChannel):
+        """Convert AB channels to RGB using L channel"""
+        # Scale to expected ranges
+        lScaled = lChannel * 100.0  # [0, 100]
+        abScaled = abChannels * 255.0  # [0, 255]
+
+        return labToRgb(lScaled, abScaled)
+
+    def convertToRgb(self, images, channelType):
+        """Convert images to RGB based on channel type"""
+        if channelType == "RGB" or images.shape[1] == 3:
+            return images
+        elif channelType == "luminance" or images.shape[1] == 1:
+            return images.repeat(1, 3, 1, 1)
+        elif channelType == "R":
+            return torch.cat([images, torch.zeros_like(images), torch.zeros_like(images)], dim=1)
+        elif channelType == "G":
+            return torch.cat([torch.zeros_like(images), images, torch.zeros_like(images)], dim=1)
+        elif channelType == "B":
+            return torch.cat([torch.zeros_like(images), torch.zeros_like(images), images], dim=1)
+        else:
+            return images.repeat(1, 3, 1, 1)
