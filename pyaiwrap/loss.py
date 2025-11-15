@@ -534,7 +534,7 @@ class GeneratorColorizationLoss:
 
         return {
             'loss': total_loss,
-            'reconstruction_loss': reconstruction_loss,
+            'reconstruction_loss': reconstruction_loss*self.recon_weight,
             'perceptual_loss': perceptual_loss*self.perceptual_weight,
             'colorfulness_loss': colorfulness_loss*self.colorfulness_weight,
             'reconstructed_images': reconstructed_images
