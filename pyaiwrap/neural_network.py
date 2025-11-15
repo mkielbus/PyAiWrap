@@ -926,7 +926,7 @@ class ColorMemoryTransformer(nn.Module):
         self.pixel_upsample = PatchUpsample(
             patch_size=patch_size,
             embed_dim=memory_size,
-            out_channels=64
+            out_channels=self.color_channels
         )
 
         self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
@@ -1039,7 +1039,7 @@ class ColorMemoryTransformer(nn.Module):
         # Element-wise multiplication: both [batch_size, num_patches, memory_size]
         output = pixel_features * color_features  # [batch_size, num_patches, memory_size]
 
-        output = self.pixel_upsample(output)  # [batch_size, 1, h, w]
+        output = self.pixel_upsample(output)  # [batch_size, channels, h, w]
 
         output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
 
