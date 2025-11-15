@@ -35,7 +35,7 @@ def labToRgb(lChannel, abChannels):
     xyz = torch.where(mask, xyz ** 3, (xyz - 16.0/116.0) / 7.787)
 
     # Multiply by reference white (D65)
-    reference_white = torch.tensor([0.95047, 1.0, 1.08883], 
+    reference_white = torch.tensor([0.95047, 1.0, 1.08883],
                                    device=xyz.device, dtype=xyz.dtype).view(1, 3, 1, 1)
     xyz = xyz * reference_white
 
