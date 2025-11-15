@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
-from .transforms import labToRgb
+from .transforms import labToRgb, labToRgbForVisualization
 
 
 class LPIPSLoss(nn.Module):
@@ -443,12 +443,15 @@ class GeneratorColorizationLoss:
 
         Args:
             reconstruction_loss_fn: Loss function for reconstruction (default: MSELoss)
+            recon_weight: Weight for reconstruction loss
             perceptual_weight: Weight for perceptual loss (0 to disable)
             colorfulness_weight: Weight for colorfulness loss (0 to disable)
             colorfulness_target: Target colorfulness value (if None, matches original)
             use_lpips: Whether to use LPIPS for perceptual loss (default: False)
             lpips_net: Network to use for LPIPS ('alex', 'vgg', 'squeeze') (default: 'alex')
             device: Device to place LPIPS network on
+            input_channel: Type of input channel ("RGB", "R", "G", "B", "LAB", "AB", "luminance")
+            target_channel: Type of target channel ("RGB", "R", "G", "B", "LAB", "AB", "luminance")
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.recon_weight = recon_weight
@@ -542,33 +545,15 @@ class GeneratorColorizationLoss:
 
     def calculatePerceptualLoss(self, reconstructed, original, modified):
         """Calculate perceptual loss, converting to RGB if needed"""
-
-        if self.target_channel == "ab" and reconstructed.shape[1] == 2:
-            if modified.shape[1] == 3:  # RGB input
-                lChannel = self.rgbToLuminance(modified)
-                reconRgb = labToRgb(lChannel, reconstructed)
-                originalRgb = labToRgb(lChannel, original)
-            elif modified.shape[1] == 1:  # L channel
-                reconRgb = labToRgb(modified, reconstructed)
-                originalRgb = labToRgb(modified, original)
-            else:
-                fakeL = torch.ones_like(reconstructed[:, 0:1]) * 0.5  # [0,1] range for PyTorch
-                reconRgb = labToRgb(fakeL, reconstructed)
-                originalRgb = labToRgb(fakeL, original)
-        else:
-            reconRgb = self.convertToRgb(reconstructed, self.target_channel)
-            originalRgb = self.convertToRgb(original, self.target_channel)
+        # Convert to RGB for perceptual loss calculation
+        recon_rgb = self._convert_to_rgb_for_loss(reconstructed, original, modified)
+        original_rgb = self._convert_to_rgb_for_loss(original, original, modified)
 
         # LPIPS expects images in range [-1, 1]
-        reconNormalized = reconRgb * 2.0 - 1.0
-        originalNormalized = originalRgb * 2.0 - 1.0
+        recon_normalized = recon_rgb * 2.0 - 1.0
+        original_normalized = original_rgb * 2.0 - 1.0
 
-        return self.perceptual_loss_fn(reconNormalized, originalNormalized).mean()
-
-    def rgbToLuminance(self, rgbImages):
-        """Convert RGB to luminance (L channel) using standard weights"""
-        luminance = 0.299 * rgbImages[:, 0:1] + 0.587 * rgbImages[:, 1:2] + 0.114 * rgbImages[:, 2:3]
-        return luminance
+        return self.perceptual_loss_fn(recon_normalized, original_normalized).mean()
 
     def calculateColorfulnessLoss(self, reconstructed, original, modified):
         """Calculate colorfulness loss, converting to RGB if needed"""
@@ -578,24 +563,12 @@ class GeneratorColorizationLoss:
         colorfulnessOriginal = torch.tensor(0.0, device=reconstructed.device)
 
         if self.colorfulness_weight > 0:
-            if self.target_channel == "ab" and reconstructed.shape[1] == 2:
-                if modified.shape[1] == 3:  # RGB input
-                    lChannel = self.rgbToLuminance(modified)
-                    reconRgb = labToRgb(lChannel, reconstructed)
-                    originalRgb = labToRgb(lChannel, original)
-                elif modified.shape[1] == 1:
-                    reconRgb = labToRgb(modified, reconstructed)
-                    originalRgb = labToRgb(modified, original)
-                else:
-                    fakeL = torch.ones_like(reconstructed[:, 0:1]) * 0.5  # [0,1] range
-                    reconRgb = labToRgb(fakeL, reconstructed)
-                    originalRgb = labToRgb(fakeL, original)
-            else:
-                reconRgb = self.convertToRgb(reconstructed, self.target_channel)
-                originalRgb = self.convertToRgb(original, self.target_channel)
+            # Convert to RGB for colorfulness calculation
+            recon_rgb = self._convert_to_rgb_for_loss(reconstructed, original, modified)
+            original_rgb = self._convert_to_rgb_for_loss(original, original, modified)
 
-            colorfulnessRecon = calculateColorfulnessLoss(reconRgb)
-            colorfulnessOriginal = calculateColorfulnessLoss(originalRgb)
+            colorfulnessRecon = calculateColorfulnessLoss(recon_rgb)
+            colorfulnessOriginal = calculateColorfulnessLoss(original_rgb)
 
             if self.colorfulness_target is not None:
                 target = torch.tensor(self.colorfulness_target, device=reconstructed.device)
@@ -605,17 +578,39 @@ class GeneratorColorizationLoss:
 
         return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
 
-    def convertToRgb(self, images, channelType):
-        """Convert images to RGB based on channel type"""
-        if channelType == "RGB" or images.shape[1] == 3:
+    def _convert_to_rgb_for_loss(self, images, original, modified):
+        """Convert images to RGB for perceptual/colorfulness losses"""
+        if self.target_channel == "RGB":
             return images
-        elif channelType == "luminance" or images.shape[1] == 1:
+        elif self.target_channel == "luminance":
             return images.repeat(1, 3, 1, 1)
-        elif channelType == "R":
+        elif self.target_channel == "AB":
+            # For AB channels, we need L channel to convert to RGB
+            if self.input_channel == "luminance" and modified.shape[1] == 1:
+                # Colorization case: use modified (L) + images (AB)
+                return labToRgb(modified * 100.0, images)  # L: [0,1] -> [0,100]
+            elif self.input_channel == "RGB" and modified.shape[1] == 3:
+                # AB prediction case: use original image's L + images (AB)
+                l_channel = self._rgb_to_luminance(modified) * 100.0
+                return labToRgb(l_channel, images)
+            else:
+                # Fallback: use middle-gray L
+                fake_l = torch.ones_like(images[:, 0:1]) * 50.0  # [0,100] range
+                return labToRgb(fake_l, images)
+        elif self.target_channel == "LAB":
+            # Full LAB to RGB
+            return labToRgbForVisualization(images)
+        elif self.target_channel == "R":
             return torch.cat([images, torch.zeros_like(images), torch.zeros_like(images)], dim=1)
-        elif channelType == "G":
+        elif self.target_channel == "G":
             return torch.cat([torch.zeros_like(images), images, torch.zeros_like(images)], dim=1)
-        elif channelType == "B":
+        elif self.target_channel == "B":
             return torch.cat([torch.zeros_like(images), torch.zeros_like(images), images], dim=1)
         else:
             return images.repeat(1, 3, 1, 1)
+
+    def _rgb_to_luminance(self, rgb_images):
+        """Convert RGB to luminance (L channel) using standard weights"""
+        # RGB in [0,1] range
+        luminance = 0.299 * rgb_images[:, 0:1] + 0.587 * rgb_images[:, 1:2] + 0.114 * rgb_images[:, 2:3]
+        return luminance

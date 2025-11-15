@@ -1,5 +1,6 @@
 import torch
 import torchvision.transforms.functional as TF
+import kornia
 from torchvision import transforms
 from PIL import Image
 import numpy as np
@@ -249,11 +250,12 @@ class ExtractBlueChannelTo3Channel(ExtractChannelTo3Channel):
         super().__init__(channel_index=2)
 
 
-class RGBToLab(ImageTransform):
-    """Convert RGB image to LAB color space using PyTorch's built-in conversion"""
+class RGBToLAB(ImageTransform):
+    """Convert RGB image to LAB color space using Kornia conversion"""
 
     def __init__(self):
         """Initialize RGB to LAB conversion"""
+        super().__init__()
 
     def __call__(self, img):
         """Convert RGB image to LAB color space and return as tensor"""
@@ -267,16 +269,24 @@ class RGBToLab(ImageTransform):
             raise TypeError(f"Unsupported type: {type(img)}")
 
     def _handleTensor(self, img):
-        """Convert tensor from RGB to LAB using PyTorch"""
-        if img.shape[0] != 3:
+        """Convert tensor from RGB to LAB using Kornia"""
+        if img.dim() == 3:
+            img = img.unsqueeze(0)  # Add batch dimension
+
+        if img.shape[-3] != 3:
             raise ValueError("Input tensor must have 3 channels for RGB to LAB conversion")
 
-        # Ensure RGB is in [0, 1] range for PyTorch conversion
+        # Ensure RGB is in [0, 1] range for Kornia conversion
         if img.max() > 1.0:
             img = img / 255.0
 
-        # Returns: L: [0, 100], A: [-128, 127], B: [-128, 127]
-        lab = TF.rgb_to_lab(img)
+        # Kornia returns: L: [0, 100], A: [-127, 127], B: [-127, 127] (approximately)
+        lab = kornia.color.rgb_to_lab(img)
+
+        # Remove batch dimension if input was 3D
+        if lab.dim() == 4 and lab.shape[0] == 1:
+            lab = lab.squeeze(0)
+
         return lab
 
     def _handleNumpy(self, img):
@@ -285,7 +295,7 @@ class RGBToLab(ImageTransform):
             raise ValueError("Input array must have 3 channels for RGB to LAB conversion")
 
         img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-        return TF.rgb_to_lab(img_tensor)
+        return self._handleTensor(img_tensor)
 
     def _handlePil(self, img):
         """Convert PIL Image from RGB to LAB and return as tensor"""
@@ -293,69 +303,61 @@ class RGBToLab(ImageTransform):
             img = img.convert('RGB')
 
         img_tensor = transforms.ToTensor()(img)
-        return TF.rgb_to_lab(img_tensor)
+        return self._handleTensor(img_tensor)
 
     def __repr__(self):
         return f"{self.__class__.__name__}()"
 
 
 class ExtractABChannels(ImageTransform):
-    """Extract A and B channels from LAB color space using PyTorch ranges"""
+    """Extract A and B channels from LAB color space - expects LAB input in Kornia's ranges"""
 
     def __init__(self, num_output_channels: int = 2):
         """
         Initialize AB channels extraction.
 
+        IMPORTANT: Expects input to already be in LAB color space with Kornia's ranges:
+        L: [0, 100], A: [-127, 127], B: [-127, 127]
+
         Args:
             num_output_channels: Number of output channels (2 or 3)
         """
+        super().__init__()
         if num_output_channels not in [2, 3]:
             raise ValueError("num_output_channels must be 2 or 3")
         self.num_output_channels = num_output_channels
 
     def __call__(self, img):
-        """Extract A and B channels from LAB tensor"""
+        """
+        Extract A and B channels from LAB tensor.
+
+        Expects input to be LAB tensor from RGBToLAB transform.
+        """
+        # Direct tensor extraction - assumes input is already LAB
         if isinstance(img, torch.Tensor):
-            return self._handleTensor(img)
+            return self._extract_ab_channels(img)
         else:
-            if isinstance(img, Image.Image):
-                img = transforms.ToTensor()(img)
-            elif isinstance(img, np.ndarray):
-                img = torch.from_numpy(img).permute(2, 0, 1).float()
-            return self._handleTensor(img)
+            # If input is not tensor, it's probably not in LAB space
+            raise TypeError("ExtractABChannels expects LAB tensor input. Use RGBToLAB transform first.")
 
-    def _handleTensor(self, img):
-        """Extract AB channels from tensor in LAB format"""
-        if img.dim() != 3:
-            raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
+    def _extract_ab_channels(self, lab_tensor):
+        """Extract AB channels from LAB tensor"""
+        if lab_tensor.dim() != 3:
+            raise ValueError(f"Input tensor must have 3 dimensions, got {lab_tensor.dim()}")
 
-        if img.shape[0] == 1:
-            raise ValueError("Cannot extract AB channels from single channel image")
+        if lab_tensor.shape[0] != 3:
+            raise ValueError(f"Input tensor must have 3 channels (LAB), got {lab_tensor.shape[0]}")
 
-        if img.shape[0] == 2:
-            ab_channels = img
-        elif img.shape[0] == 3:
-            # PyTorch LAB format: L:[0,100], A:[-128,127], B:[-128,127]
-            #  AB to [0,1] range for model training
-            ab_channels = (img[1:3, :, :] + 128.0) / 255.0  # [-128,127] -> [0,1]
-        else:
-            raise ValueError(f"Unsupported tensor shape: {img.shape}")
+        # Simple tensor slicing to get AB channels
+        # L: [0, 100], A: [-127, 127], B: [-127, 127]
+        ab_channels = lab_tensor[1:3, :, :]
 
         if self.num_output_channels == 3:
+            # Create 3-channel output with zeros in L channel
             zeros = torch.zeros_like(ab_channels[0:1, :, :])
             return torch.cat([zeros, ab_channels], dim=0)
         else:
             return ab_channels
-
-    def _handleNumpy(self, img):
-        """Extract AB channels from numpy array - convert to tensor"""
-        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
-        return self._handleTensor(img_tensor)
-
-    def _handlePil(self, img):
-        """Extract AB channels from PIL Image - convert to tensor"""
-        img_tensor = transforms.ToTensor()(img)
-        return self._handleTensor(img_tensor)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_output_channels={self.num_output_channels})"
@@ -366,47 +368,30 @@ class ExtractABChannelsTo3Channel(ImageTransform):
 
     def __init__(self):
         """Initialize AB channels extraction to 3-channel LAB format"""
+        super().__init__()
 
     def __call__(self, img):
         """Extract AB channels and create 3-channel LAB tensor"""
+        # Direct tensor extraction - assumes input is already LAB
         if isinstance(img, torch.Tensor):
-            return self._handleTensor(img)
+            return self._extract_to_3channel(img)
         else:
-            if isinstance(img, Image.Image):
-                img = transforms.ToTensor()(img)
-            elif isinstance(img, np.ndarray):
-                img = torch.from_numpy(img).permute(2, 0, 1).float()
-            return self._handleTensor(img)
+            raise TypeError("ExtractABChannelsTo3Channel expects LAB tensor input. Use RGBToLAB transform first.")
 
-    def _handleTensor(self, img):
+    def _extract_to_3channel(self, lab_tensor):
         """Extract AB channels from tensor and create 3-channel LAB output"""
-        if img.dim() != 3:
-            raise ValueError(f"Input tensor must have 3 dimensions, got {img.dim()}")
+        if lab_tensor.dim() != 3:
+            raise ValueError(f"Input tensor must have 3 dimensions, got {lab_tensor.dim()}")
 
-        if img.shape[0] == 1:
-            raise ValueError("Cannot extract AB channels from single channel image")
+        if lab_tensor.shape[0] != 3:
+            raise ValueError(f"Input tensor must have 3 channels (LAB), got {lab_tensor.shape[0]}")
 
-        if img.shape[0] == 2:
-            # AB channels in [0,1] range
-            ab_channels = img
-        elif img.shape[0] == 3:
-            # Extract AB and convert to [0,1] range
-            ab_channels = (img[1:3, :, :] + 128.0) / 255.0
-        else:
-            raise ValueError(f"Unsupported tensor shape: {img.shape}")
+        # Extract AB channels
+        ab_channels = lab_tensor[1:3, :, :]
 
+        # Create 3-channel output with zeros in L channel
         zeros = torch.zeros_like(ab_channels[0:1, :, :])
         return torch.cat([zeros, ab_channels], dim=0)
-
-    def _handleNumpy(self, img):
-        """Handle numpy array - convert to tensor"""
-        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
-        return self._handleTensor(img_tensor)
-
-    def _handlePil(self, img):
-        """Handle PIL Image - convert to tensor"""
-        img_tensor = transforms.ToTensor()(img)
-        return self._handleTensor(img_tensor)
 
     def __repr__(self):
         return f"{self.__class__.__name__}()"
@@ -414,33 +399,52 @@ class ExtractABChannelsTo3Channel(ImageTransform):
 
 def labToRgb(lChannel, abChannels):
     """
-    Convert L and AB channels to RGB using PyTorch's built-in conversion.
+    Convert L and AB channels to RGB using Kornia's built-in conversion.
+    Expects channels in Kornia's native ranges.
 
     Args:
-        lChannel: L channel in [0,1] range (will be scaled to [0,100])
-        abChannels: AB channels in [0,1] range (will be scaled to [-128,127])
+        lChannel: L channel in [0, 100] range (Kornia's native range)
+        abChannels: AB channels in [-127, 127] range (Kornia's native range)
 
     Returns:
         RGB tensor in [0,1] range
     """
-    l_scaled = lChannel * 100.0  # [0,1] -> [0,100]
-    ab_scaled = abChannels * 255.0 - 128.0  # [0,1] -> [-128,127]
+    # Ensure proper dimensions
+    if lChannel.dim() == 3:
+        lChannel = lChannel.unsqueeze(0)
+    if abChannels.dim() == 3:
+        abChannels = abChannels.unsqueeze(0)
 
-    lab = torch.cat([l_scaled, ab_scaled], dim=1)
+    # Combine L and AB channels - both in Kornia's native ranges
+    lab = torch.cat([lChannel, abChannels], dim=1)
 
-    return TF.lab_to_rgb(lab)
+    rgb = kornia.color.lab_to_rgb(lab)
+
+    # Remove batch dimension if needed
+    if rgb.shape[0] == 1:
+        rgb = rgb.squeeze(0)
+
+    return rgb
 
 
 def labToRgbForVisualization(labTensor):
     """
     Convert LAB tensor to RGB tensor for visualization purposes.
-    Uses PyTorch's built-in conversion.
+    Uses Kornia's built-in conversion.
 
     Args:
-        labTensor: LAB tensor of shape (batch_size, 3, H, W) in PyTorch format
-                  L: [0,100], A: [-128,127], B: [-128,127]
+        labTensor: LAB tensor of shape (batch_size, 3, H, W) in Kornia format
+                  L: [0,100], A: [-127,127], B: [-127,127]
 
     Returns:
         RGB tensor in range [0, 1]
     """
-    return TF.lab_to_rgb(labTensor)
+    if labTensor.dim() == 3:
+        labTensor = labTensor.unsqueeze(0)
+
+    rgb = kornia.color.lab_to_rgb(labTensor)
+
+    if rgb.shape[0] == 1:
+        rgb = rgb.squeeze(0)
+
+    return rgb
