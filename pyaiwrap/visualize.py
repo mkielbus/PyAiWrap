@@ -3,7 +3,6 @@ import os
 from torchvision.utils import make_grid, save_image
 from typing import Optional
 from .transforms import labToRgb, labToRgbForVisualization
-import kornia
 
 
 def convertToRgb(images: torch.Tensor,
@@ -148,7 +147,7 @@ def visualizeReconstruction(originalImages: torch.Tensor,
 
     if is_colorization:
         # Colorization: L -> AB
-        originalRgb = convertToRgb(originalImages, "RGB", input_range=original_range)
+        originalRgb = convertToRgb(originalImages, "AB", modifiedImages, input_range=original_range)
         modifiedRgb = convertToRgb(modifiedImages, "luminance", input_range=modified_range)
         reconstructedRgb = convertToRgb(reconstructedImages, "AB", modifiedImages, input_range=reconstructed_range)
 
