@@ -835,7 +835,6 @@ class ColorMemoryTransformer(nn.Module):
                  patch_size: int = 16,
                  target_channel: str = 'red',
                  memory_size: int = 256,
-                 color_channels: int = 64,
                  smoothing_config_path: str = None):
         super().__init__()
 
@@ -844,7 +843,6 @@ class ColorMemoryTransformer(nn.Module):
         self.target_channel = target_channel
         self.memory_size = memory_size
         self.num_layers = num_layers
-        self.color_channels = color_channels
 
         if target_channel not in ['red', 'green', 'blue']:
             raise ValueError("target_channel must be 'red', 'green', or 'blue'")
@@ -920,13 +918,10 @@ class ColorMemoryTransformer(nn.Module):
             use_causal_mask=False
         )
 
-        self.color_projection = nn.Linear(embed_dim, memory_size)
-        self.pixel_projection = nn.Linear(embed_dim, memory_size)
-
         self.pixel_upsample = PatchUpsample(
             patch_size=patch_size,
-            embed_dim=memory_size,
-            out_channels=self.color_channels
+            embed_dim=embed_dim,
+            out_channels=embed_dim
         )
 
         self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
@@ -988,31 +983,31 @@ class ColorMemoryTransformer(nn.Module):
 
         final_pixel_output = pixel_decoder_outputs[-1]  # [batch_size, num_patches, embed_dim]
 
-        pixel_features = self.pixel_projection(final_pixel_output)  # [batch_size, num_patches, memory_size]
+        pixel_features = self.pixel_upsample(final_pixel_output)  # [batch_size, embed_dim, h, w]
 
-        if self.training and target_channel_img is not None:
-            target_patches = self.target_channel_embed(target_channel_img)
-            target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
-            target_patches = target_patches + target_pos_encoding
+        # if self.training and target_channel_img is not None:
+        #     target_patches = self.target_channel_embed(target_channel_img)
+        #     target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
+        #     target_patches = target_patches + target_pos_encoding
 
-            batch_color_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        #     batch_color_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
 
-            updated_memory = self.memory_learning_attention(
-                query=batch_color_memory,
-                key=target_patches,
-                value=target_patches
-            )
-        else:
-            updated_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        #     updated_memory = self.memory_learning_attention(
+        #         query=batch_color_memory,
+        #         key=target_patches,
+        #         value=target_patches
+        #     )
+        # else:
+        updated_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
 
-        color_decoder_input = luminance_patches
+        color_decoder_input = updated_memory
 
         for i, color_layer in enumerate(self.color_decoder_layers):
             if i == 0:
                 cross_attn_out = color_layer['cross_attention'](
                     query=color_decoder_input,
-                    key=updated_memory,
-                    value=updated_memory
+                    key=luminance_patches,
+                    value=luminance_patches
                 )
             else:
                 cross_attn_out = color_layer['cross_attention'](
@@ -1032,16 +1027,17 @@ class ColorMemoryTransformer(nn.Module):
             color_decoder_input = color_decoder_input + mlp_out
             color_decoder_input = color_layer['norm3'](color_decoder_input)
 
-        final_color_output = color_decoder_input  # [batch_size, num_patches, embed_dim]
+        color_features = color_decoder_input  # [batch_size, memory_size, embed_dim]
 
-        color_features = self.color_projection(final_color_output)  # [batch_size, num_patches, memory_size]
+        pixel_flat = pixel_features.view(batch_size, self.embed_dim, -1)  # [batch_size, embed_dim, h*w]
 
-        # Element-wise multiplication: both [batch_size, num_patches, memory_size]
-        output = pixel_features * color_features  # [batch_size, num_patches, memory_size]
+        # [batch_size, memory_size, embed_dim] @ [batch_size, embed_dim, h*w] = [batch_size, memory_size, h*w]
+        output = torch.bmm(color_features, pixel_flat)  # [batch_size, memory_size, h*w]
 
-        output = self.pixel_upsample(output)  # [batch_size, color_channels, h, w]
+        output = output.view(batch_size, self.memory_size, h, w)  # [batch_size, memory_size, h, w]
 
-        output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
+        # Final smoothing: [batch_size, memory_size, h, w] -> [batch_size, 1, h, w]
+        output = self.smoothing_layers(output)
 
         return output
 
