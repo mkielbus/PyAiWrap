@@ -162,7 +162,7 @@ def visualizeReconstruction(originalImages: torch.Tensor,
 
     Args:
         originalImages: Tensor of shape (batch_size, C, H, W)
-        modifiedImages: Tensor of shape (batch_size, C, H, W) 
+        modifiedImages: Tensor of shape (batch_size, C, H, W)
         reconstructedImages: Tensor of shape (batch_size, C, H, W)
         epoch: Current epoch number
         savePath: Directory to save the visualization
