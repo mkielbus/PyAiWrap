@@ -3,6 +3,7 @@ import os
 from torchvision.utils import make_grid, save_image
 from typing import Optional
 from .transforms import labToRgb, labToRgbForVisualization
+import kornia
 
 
 def convertToRgb(images: torch.Tensor,
@@ -51,7 +52,7 @@ def convertToRgb(images: torch.Tensor,
                 # L from [0,1] to [0,100]
                 l_channel = paired_images * 100.0
                 # AB should be in Kornia range
-                ab_channels = images
+                ab_channels = images * 254.0 - 127.0
             else:
                 l_channel = paired_images
                 ab_channels = images
@@ -152,10 +153,12 @@ def visualizeReconstruction(originalImages: torch.Tensor,
         reconstructedRgb = convertToRgb(reconstructedImages, "AB", modifiedImages, input_range=reconstructed_range)
 
     elif is_ab_from_rgb:
-        # AB prediction from RGB
-        originalRgb = convertToRgb(originalImages, "AB", input_range=original_range)
+        l_channel = 0.299 * modifiedImages[:, 0:1] + 0.587 * modifiedImages[:, 1:2] + 0.114 * modifiedImages[:, 2:3]
+        l_channel = l_channel * 100.0  # Convert to [0,100] range
+        # Use the same L channel for both original and reconstructed AB
+        originalRgb = convertToRgb(originalImages, "AB", paired_images=l_channel, input_range=original_range)
         modifiedRgb = convertToRgb(modifiedImages, "RGB", input_range=modified_range)
-        reconstructedRgb = convertToRgb(reconstructedImages, "AB", input_range=reconstructed_range)
+        reconstructedRgb = convertToRgb(reconstructedImages, "AB", paired_images=l_channel, input_range=reconstructed_range)
 
     elif is_lab_reconstruction:
         # LAB reconstruction: RGB -> LAB
@@ -185,4 +188,3 @@ def visualizeReconstruction(originalImages: torch.Tensor,
     saveFile = os.path.join(savePath,
                             f'{modelType}_{launchNumber}_{hyperparamsId}_epoch_{epoch:03d}_{inputChannel}_to_{targetChannel}.png')
     save_image(grid, saveFile)
-    print(f"Saved visualization: {inputChannel} -> {targetChannel} to {saveFile}")
