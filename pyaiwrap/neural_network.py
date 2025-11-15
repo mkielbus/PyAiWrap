@@ -861,7 +861,7 @@ class ColorMemoryTransformer(nn.Module):
             embed_dim=embed_dim
         )
 
-        self.color_memory = nn.Parameter(torch.randn(1, memory_size, embed_dim))
+        self.color_memory = nn.Parameter(torch.zeros(memory_size, embed_dim))  # [K, C]
 
         self.pixel_decoder_layers = nn.ModuleList([
             TransformerBlock(
@@ -920,8 +920,8 @@ class ColorMemoryTransformer(nn.Module):
             use_causal_mask=False
         )
 
-        self.color_projection = nn.Linear(embed_dim, color_channels)
-        self.pixel_projection = nn.Linear(embed_dim, 1)
+        self.color_projection = nn.Linear(embed_dim, memory_size)
+        self.pixel_projection = nn.Linear(embed_dim, memory_size)
 
         self.pixel_upsample = PatchUpsample(
             patch_size=patch_size,
@@ -986,25 +986,24 @@ class ColorMemoryTransformer(nn.Module):
             current_pixel_output = pixel_layer(current_pixel_output)
             pixel_decoder_outputs.append(current_pixel_output)
 
-        final_pixel_output = pixel_decoder_outputs[-1]  # [batch_size, patch_pixels, embed_dim]
+        final_pixel_output = pixel_decoder_outputs[-1]  # [batch_size, num_patches, embed_dim]
 
-        # pixel decoder output: [batch_size, patch_pixels, embed_dim] -> [batch_size, 1, h, w]
-        pixel_features = self.pixel_projection(final_pixel_output)  # [batch_size, patch_pixels, 1]
-        pixel_features = self.pixel_upsample(pixel_features)  # [batch_size, 1, h, w]
+        pixel_features = self.pixel_projection(final_pixel_output)  # [batch_size, num_patches, memory_size]
 
         if self.training and target_channel_img is not None:
             target_patches = self.target_channel_embed(target_channel_img)
             target_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, img.device)
             target_patches = target_patches + target_pos_encoding
 
-            batch_color_memory = self.color_memory.repeat(batch_size, 1, 1)
+            batch_color_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+
             updated_memory = self.memory_learning_attention(
                 query=batch_color_memory,
                 key=target_patches,
                 value=target_patches
             )
         else:
-            updated_memory = self.color_memory.repeat(batch_size, 1, 1)
+            updated_memory = self.color_memory.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
 
         color_decoder_input = luminance_patches
 
@@ -1033,19 +1032,20 @@ class ColorMemoryTransformer(nn.Module):
             color_decoder_input = color_decoder_input + mlp_out
             color_decoder_input = color_layer['norm3'](color_decoder_input)
 
-        final_color_output = color_decoder_input  # [batch_size, patch_colors, embed_dim]
+        final_color_output = color_decoder_input  # [batch_size, num_patches, embed_dim]
 
-        # color decoder output: [batch_size, patch_colors, embed_dim] -> [batch_size, color_channels, 1]
-        color_features = self.color_projection(final_color_output)  # [batch_size, patch_colors, color_channels]
-        color_features = color_features.mean(dim=1, keepdim=True)  # [batch_size, 1, color_channels]
-        color_features = color_features.transpose(1, 2)  # [batch_size, color_channels, 1]
+        color_features = self.color_projection(final_color_output)  # [batch_size, num_patches, memory_size]
 
-        pixel_flat = pixel_features.view(batch_size, 1, -1)  # [batch_size, 1, h*w]
-        output = torch.matmul(color_features, pixel_flat)  # [batch_size, color_channels, h*w]
-        output = output.view(batch_size, self.color_channels, h, w)  # [batch_size, color_channels, h, w]
+        # Element-wise multiplication: both [batch_size, num_patches, memory_size]
+        output = pixel_features * color_features  # [batch_size, num_patches, memory_size]
 
-        # Final smoothing of patches artifacts: [batch_size, color_channels, h, w] -> [batch_size, 1, h, w]
-        output = self.smoothing_layers(output)
+        output = output.transpose(1, 2)  # [batch_size, memory_size, num_patches]
+
+        output = output.view(batch_size, self.memory_size, patch_h, patch_w)  # [batch_size, memory_size, patch_h, patch_w]
+
+        output = self.pixel_upsample(output)  # [batch_size, 1, h, w]
+
+        output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
 
         return output
 
