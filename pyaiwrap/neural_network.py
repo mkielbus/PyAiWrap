@@ -1313,3 +1313,22 @@ class UNetWithSkipConnections(nn.Module):
             x = layer(x)
 
         return x
+
+
+class ResidualRefinement(nn.Module):
+    def __init__(self, in_channels=3, hidden_channels=8):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
+        self.norm1 = nn.InstanceNorm2d(hidden_channels)
+        self.activation = nn.GELU()
+        self.conv2 = nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x):
+        identity = x
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.activation(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+        return torch.clamp(identity + out * 0.1, 0, 1)
