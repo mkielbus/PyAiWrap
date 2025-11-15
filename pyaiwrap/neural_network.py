@@ -925,7 +925,7 @@ class ColorMemoryTransformer(nn.Module):
 
         self.pixel_upsample = PatchUpsample(
             patch_size=patch_size,
-            embed_dim=1,
+            embed_dim=memory_size,
             out_channels=1
         )
 
@@ -1038,10 +1038,6 @@ class ColorMemoryTransformer(nn.Module):
 
         # Element-wise multiplication: both [batch_size, num_patches, memory_size]
         output = pixel_features * color_features  # [batch_size, num_patches, memory_size]
-
-        output = output.transpose(1, 2)  # [batch_size, memory_size, num_patches]
-
-        output = output.view(batch_size, self.memory_size, patch_h, patch_w)  # [batch_size, memory_size, patch_h, patch_w]
 
         output = self.pixel_upsample(output)  # [batch_size, 1, h, w]
 
