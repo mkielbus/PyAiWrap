@@ -142,7 +142,6 @@ def visualizeReconstruction(originalImages: torch.Tensor,
         original_range = detect_range(originalImages, targetChannel)
         modified_range = detect_range(modifiedImages, inputChannel)
         reconstructed_range = detect_range(reconstructedImages, targetChannel)
-        print(f"Auto-detected ranges: original={original_range}, modified={modified_range}, reconstructed={reconstructed_range}")
     else:
         original_range = modified_range = reconstructed_range = input_range
 
@@ -151,23 +150,11 @@ def visualizeReconstruction(originalImages: torch.Tensor,
     is_lab_reconstruction = (inputChannel == "RGB" and targetChannel == "LAB")
     is_single_channel = (inputChannel in ["R", "G", "B", "luminance"] and targetChannel in ["R", "G", "B"])
 
-    print(f"Case detection: colorization={is_colorization}, ab_from_rgb={is_ab_from_rgb}, lab_reconstruction={is_lab_reconstruction}")
     if is_colorization:
         # Colorization: L -> AB
-        print("Processing colorization case...")
-        
-        # Convert each one individually with debugging
-        print("Converting originalImages (should be AB)...")
         originalRgb = convertToRgb(originalImages, "AB", paired_images=modifiedImages, input_range=original_range)
-        print(f"  originalRgb shape: {originalRgb.shape}")
-        
-        print("Converting modifiedImages (should be L)...")
         modifiedRgb = convertToRgb(modifiedImages, "luminance", input_range=modified_range)
-        print(f"  modifiedRgb shape: {modifiedRgb.shape}")
-        
-        print("Converting reconstructedImages (should be AB)...")
         reconstructedRgb = convertToRgb(reconstructedImages, "AB", paired_images=modifiedImages, input_range=reconstructed_range)
-        print(f"  reconstructedRgb shape: {reconstructedRgb.shape}")
 
     elif is_ab_from_rgb:
         l_channel = 0.299 * modifiedImages[:, 0:1] + 0.587 * modifiedImages[:, 1:2] + 0.114 * modifiedImages[:, 2:3]
