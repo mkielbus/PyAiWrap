@@ -4,8 +4,7 @@ import torch.nn.functional as F
 import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
-from .neural_network import ColorizationTransformerNet
-from visualize import labToRgb
+from .visualize import labToRgb
 
 
 class LPIPSLoss(nn.Module):
