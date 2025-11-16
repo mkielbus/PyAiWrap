@@ -848,7 +848,7 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
 class LuminanceEncoder(nn.Module):
     def __init__(self, encoder_module: Optional[nn.Module] = None, config_path: Optional[str] = None):
         super().__init__()
-        self.feature_inputs = []  # Store inputs to downsampling blocks
+        self.feature_outputs = []  # Store inputs to downsampling blocks
 
         if encoder_module is not None:
             self.layers = encoder_module
@@ -878,17 +878,17 @@ class LuminanceEncoder(nn.Module):
             raise RuntimeError(f"Failed to load encoder from {config_path}: {e}")
 
     def forward(self, x: torch.Tensor) -> tuple[List[torch.Tensor], torch.Tensor]:
-        self.feature_inputs.clear()
+        self.feature_outputs.clear()
         current = x
 
         if not isinstance(self.layers, nn.Sequential):
-            # Custom module returns (feature_inputs, output)
+            # Custom module returns feature_outputs, output
             if hasattr(self.layers, 'forward') and self.layers.forward.__code__.co_argcount == 1:
                 result = self.layers(x)
-                if isinstance(result, tuple) and len(result) == 2:
+                if result and isinstance(result, list):
                     return result
-            # Fallback: custom module doesn't return feature inputs
-            return [], self.layers(x)
+            # Fallback: custom module doesn't return feature outputs
+            raise ValueError("Custom encoder module must return feature_outputs list.")
 
         for layer in self.layers:
             is_downsample = False
@@ -898,12 +898,12 @@ class LuminanceEncoder(nn.Module):
                 elif isinstance(layer.stride, tuple):
                     is_downsample = any(stride > 1 for stride in layer.stride)
 
-            if is_downsample:
-                self.feature_inputs.append(current)
-
             current = layer(current)
 
-        return self.feature_inputs, current
+            if is_downsample:
+                self.feature_outputs.append(current)
+
+        return self.feature_outputs
 
 
 class PixelDecoder(nn.Module):
@@ -951,23 +951,22 @@ class PixelDecoder(nn.Module):
         self.feature_embed = nn.Embedding(num_layers, embed_dim)
 
     def forward(self,
-                encoder_inputs: List[torch.Tensor],
-                encoder_output: torch.Tensor) -> tuple[List[torch.Tensor], torch.Tensor]:
+                encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
 
-        batch_size = encoder_inputs[0].shape[0] if encoder_inputs else encoder_output.shape[0]
-        device = encoder_output.device
+        batch_size = encoder_outputs[0].shape[0]
+        device = encoder_outputs[0].device
 
         # Initialize encoder output projection once
         if self.encoder_output_projection is None:
-            output_channels = encoder_output.shape[1]
+            output_channels = encoder_outputs[-1].shape[1]
             self.encoder_output_projection = nn.Linear(output_channels, self.embed_dim).to(device)
 
         # Initialize residual projection layers dynamically
-        if len(self.residual_projections) == 0 and encoder_inputs:
+        if len(self.residual_projections) == 0 and encoder_outputs:
             for i in range(self.num_layers):
                 # For residual connections: project encoder inputs
-                residual_idx = min(i, len(encoder_inputs) - 1)
-                residual_channels = encoder_inputs[-(residual_idx + 1)].shape[1]  # Reverse order
+                residual_idx = min(i, len(encoder_outputs) - 1)
+                residual_channels = encoder_outputs[-(residual_idx + 1)].shape[1]  # Reverse order
                 self.residual_projections.append(
                     nn.Conv2d(residual_channels, self.embed_dim, kernel_size=1).to(device)
                 )
@@ -975,20 +974,21 @@ class PixelDecoder(nn.Module):
         pixel_decoder_outputs = []
 
         # Start with the encoder output as initial features
-        b, c, h_enc, w_enc = encoder_output.shape
-        encoder_patches = encoder_output.view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, c]
+        b, c, h_enc, w_enc = encoder_outputs[-1].shape
+        encoder_patches = encoder_outputs[-1].view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, c]
         encoder_patches = self.encoder_output_projection(encoder_patches)  # [batch_size, num_patches, embed_dim]
 
         current_features = encoder_patches
 
         for i in range(self.num_layers):
             # Get corresponding residual input from encoder (reverse order)
-            if encoder_inputs and i < len(encoder_inputs):
-                residual_idx = min(i, len(encoder_inputs) - 1)
-                residual_input = encoder_inputs[-(residual_idx + 1)]  # [batch_size, channels, H, W]
+            if encoder_outputs and i < len(encoder_outputs) and i > 0:
+                residual_idx = min(i, len(encoder_outputs) - 1)
+                residual_input = encoder_outputs[-(residual_idx + 1)]  # [batch_size, channels, H_res, W_res]
 
-                residual_projected = self.residual_projections[i](residual_input)  # [batch_size, embed_dim, H, W]
+                residual_projected = self.residual_projections[i](residual_input)  # [batch_size, embed_dim, H_res, W_res]
                 b_res, c_res, h_res, w_res = residual_projected.shape
+
                 residual_patches = residual_projected.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, num_patches, embed_dim]
 
                 transformer_input = current_features + residual_patches
@@ -1204,10 +1204,10 @@ class ColorMemoryTransformer(nn.Module):
         else:
             raise ValueError("Input must be 1-channel (luminance) or 3-channel (RGB)")
 
-        encoder_inputs, encoder_output = self.luminance_encoder(luminance)
+        encoder_outputs = self.luminance_encoder(luminance)
 
         pixel_decoder_outputs, final_pixel_output = self.pixel_decoder(
-            encoder_inputs, encoder_output
+            encoder_outputs
         )
 
         color_decoder_output = self.color_decoder(pixel_decoder_outputs)  # [batch_size, memory_size, embed_dim]
