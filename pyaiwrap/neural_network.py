@@ -1101,10 +1101,9 @@ class MultiScaleColorDecoder(nn.Module):
             pixel_features = pixel_decoder_outputs[pixel_features_idx]  # [batch_size, num_patches, embed_dim]
 
             num_patches = pixel_features.shape[1]
-            pos_encoding_queries = distancePositionalEncoding(1, self.memory_size, self.embed_dim, device)  # [1, memory_size, embed_dim]
             pos_encoding_keys = distancePositionalEncoding(1, num_patches, self.embed_dim, device)  # [1, num_patches, embed_dim]
 
-            queries_with_pos = color_decoder_output + pos_encoding_queries  # [batch_size, memory_size, embed_dim]
+            queries_with_pos = color_decoder_output + memory  # [batch_size, memory_size, embed_dim]
             keys_with_pos = pixel_features + pos_encoding_keys  # [batch_size, num_patches, embed_dim]
             values = pixel_features  # [batch_size, num_patches, embed_dim]
 
@@ -1117,16 +1116,13 @@ class MultiScaleColorDecoder(nn.Module):
             color_decoder_output = color_decoder_output + cross_attn_out
             color_decoder_output = block['norm1'](color_decoder_output)
 
-            self_attn_out = block['self_attention'](query=color_decoder_output)  # [batch_size, memory_size, embed_dim]
+            self_attn_out = block['self_attention'](query=color_decoder_output + memory)  # [batch_size, memory_size, embed_dim]
             color_decoder_output = color_decoder_output + self_attn_out
             color_decoder_output = block['norm2'](color_decoder_output)
 
             mlp_out = block['mlp'](color_decoder_output)  # [batch_size, memory_size, embed_dim]
             color_decoder_output = color_decoder_output + mlp_out
             color_decoder_output = block['norm3'](color_decoder_output)
-
-            if i < self.num_layers - 1:
-                color_decoder_output = color_decoder_output + memory
 
         return color_decoder_output  # [batch_size, memory_size, embed_dim]
 
