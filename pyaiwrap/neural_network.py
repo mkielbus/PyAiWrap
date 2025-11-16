@@ -881,9 +881,8 @@ class LuminanceEncoder(nn.Module):
         self.feature_inputs.clear()
         current = x
 
-        # Handle case where layers is a single module with custom forward
         if not isinstance(self.layers, nn.Sequential):
-            # Assume custom module returns (feature_inputs, output)
+            # Custom module returns (feature_inputs, output)
             if hasattr(self.layers, 'forward') and self.layers.forward.__code__.co_argcount == 1:
                 result = self.layers(x)
                 if isinstance(result, tuple) and len(result) == 2:
@@ -892,8 +891,12 @@ class LuminanceEncoder(nn.Module):
             return [], self.layers(x)
 
         for layer in self.layers:
-            is_downsample = (isinstance(layer, (nn.Conv2d, nn.MaxPool2d, nn.AvgPool2d)) and
-                             hasattr(layer, 'stride') and layer.stride > 1)
+            is_downsample = False
+            if isinstance(layer, (nn.Conv2d, nn.MaxPool2d, nn.AvgPool2d)) and hasattr(layer, 'stride'):
+                if isinstance(layer.stride, int):
+                    is_downsample = layer.stride > 1
+                elif isinstance(layer.stride, tuple):
+                    is_downsample = any(stride > 1 for stride in layer.stride)
 
             if is_downsample:
                 self.feature_inputs.append(current)
