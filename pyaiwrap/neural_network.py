@@ -1013,7 +1013,7 @@ class ColorMemoryTransformer(nn.Module):
 
         output = output.view(batch_size, self.memory_size, h, w)  # [batch_size, memory_size, h, w]
 
-        # Final smoothing: [batch_size, memory_size, h, w] -> [batch_size, 1, h, w]
+        # Final smoothing: [batch_size, memory_size, h, w] -> [batch_size, smoothing_layers_output_channels, h, w]
         output = self.smoothing_layers(output)
 
         return output
