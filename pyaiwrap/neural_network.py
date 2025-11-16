@@ -407,16 +407,23 @@ class PatchUpsample(nn.Module):
     Input: [B, num_patches, embed_dim]
     Output: [B, out_channels, H, W]
     """
-    def __init__(self, patch_size=4, embed_dim=384, out_channels=3):
+    def __init__(self, patch_size=4, embed_dim=384, out_channels=3, upsample=True):
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.out_channels = out_channels
-        self.proj = nn.ConvTranspose2d(
-            embed_dim, out_channels,
-            kernel_size=patch_size,
-            stride=patch_size
-        )
+        if upsample:
+            self.proj = nn.ConvTranspose2d(
+                embed_dim, out_channels,
+                kernel_size=patch_size,
+                stride=patch_size
+            )
+        else:
+            self.proj = nn.Conv2d(
+                embed_dim, out_channels,
+                kernel_size=1,
+                stride=1
+            )
 
     def forward(self, x):
         # [B, num_patches, embed_dim]
@@ -1166,7 +1173,8 @@ class ColorMemoryTransformer(nn.Module):
         self.pixel_upsample = PatchUpsample(
             patch_size=patch_size,
             embed_dim=embed_dim,
-            out_channels=embed_dim
+            out_channels=embed_dim,
+            upsample=False
         )
 
         self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
