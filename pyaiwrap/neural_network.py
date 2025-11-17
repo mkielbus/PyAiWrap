@@ -977,7 +977,7 @@ class PixelDecoder(nn.Module):
             if i < self.num_layers - 1:
                 out_channels = decoder_channels[i+1]
             else:
-                out_channels = decoder_channels[i]
+                out_channels = self.embed_dim
 
             upsample_layer = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),  # [B, out_channels*4, H, W]
@@ -990,7 +990,7 @@ class PixelDecoder(nn.Module):
             nn.init.zeros_(feature_embed.weight)
             self.feature_embeddings.append(feature_embed)
 
-            if decoder_channels[i] != self.embed_dim:
+            if out_channels != self.embed_dim:
                 self.output_projections.append(nn.Linear(out_channels, self.embed_dim))
             else:
                 self.output_projections.append(nn.Identity())
