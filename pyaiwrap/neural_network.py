@@ -1040,7 +1040,9 @@ class PixelDecoder(nn.Module):
 
             output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
 
-            pixel_decoder_outputs.append(output_features_projected)
+            pos_encoding = distancePositionalEncoding(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, embed_dim]
+            output_features_projected_with_pos = output_features_projected + pos_encoding  # [batch_size, h_up*w_up, embed_dim]
+            pixel_decoder_outputs.append(output_features_projected_with_pos)
 
             current_features = output_features_with_embed  # [batch_size, h_up*w_up, c_up]
 
@@ -1108,7 +1110,6 @@ class MultiScaleColorDecoder(nn.Module):
 
     def forward(self, pixel_decoder_outputs: List[torch.Tensor]) -> torch.Tensor:
         batch_size = pixel_decoder_outputs[0].shape[0]
-        device = pixel_decoder_outputs[0].device
 
         color_queries = self.color_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
 
@@ -1120,17 +1121,12 @@ class MultiScaleColorDecoder(nn.Module):
             pixel_features_idx = i % len(pixel_decoder_outputs)
             pixel_features = pixel_decoder_outputs[pixel_features_idx]  # [batch_size, num_patches, embed_dim]
 
-            num_patches = pixel_features.shape[1]
-            pos_encoding_keys = distancePositionalEncoding(1, num_patches, self.embed_dim, device)  # [1, num_patches, embed_dim]
-
             queries_with_pos = color_decoder_output + memory  # [batch_size, memory_size, embed_dim]
-            keys_with_pos = pixel_features + pos_encoding_keys  # [batch_size, num_patches, embed_dim]
-            values = pixel_features  # [batch_size, num_patches, embed_dim]
 
             cross_attn_out = block['cross_attention'](
                 query=queries_with_pos,
-                key=keys_with_pos,
-                value=values
+                key=pixel_features,
+                value=pixel_features
             )  # [batch_size, memory_size, embed_dim]
 
             color_decoder_output = color_decoder_output + cross_attn_out
