@@ -995,9 +995,6 @@ class PixelDecoder(nn.Module):
             else:
                 self.output_projections.append(nn.Identity())
 
-        last_out_channels = decoder_channels[-1]
-        self.final_proj = nn.Conv2d(last_out_channels, self.embed_dim, kernel_size=1)
-
     def forward(self, encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
         batch_size = encoder_outputs[0].shape[0]
         device = encoder_outputs[0].device
@@ -1050,11 +1047,9 @@ class PixelDecoder(nn.Module):
         b, n_patches, c_final = current_features.shape
         h_final = h_enc * (2 ** self.num_layers)
         w_final = w_enc * (2 ** self.num_layers)
-        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, last_decoder_channels, h_final, w_final]
+        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, embed_dim, h_final, w_final]
 
-        final_pixel_output = self.final_proj(final_pixel_spatial)  # [batch_size, embed_dim, h_final, w_final]
-
-        return pixel_decoder_outputs, final_pixel_output
+        return pixel_decoder_outputs, final_pixel_spatial
 
 
 class MultiScaleColorDecoder(nn.Module):
