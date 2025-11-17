@@ -983,7 +983,7 @@ class PixelDecoder(nn.Module):
             )
             self.upsample_layers.append(upsample_layer)
 
-            feature_embed = nn.Embedding(1, decoder_channels[i])
+            feature_embed = nn.Embedding(1, out_channels)
             nn.init.zeros_(feature_embed.weight)
             self.feature_embeddings.append(feature_embed)
 
@@ -1037,8 +1037,8 @@ class PixelDecoder(nn.Module):
             output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
             output_features = self.output_projections[i](output_features)  # [batch_size, h_up*w_up, embed_dim]
 
-            feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, decoder_channels[i]]
-            feature_embed = feature_embed.expand(batch_size, -1, -1)  # [batch_size, 1, decoder_channels[i]]
+            feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, out_channels]
+            feature_embed = feature_embed.expand(batch_size, output_features.size(1), -1)  # [batch_size, h_up*w_up, out_channels]
 
             output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, embed_dim]
             pixel_decoder_outputs.append(output_features_with_embed)
