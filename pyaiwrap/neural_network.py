@@ -838,13 +838,10 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
         layer_type = layer_config["type"]
         params = layer_config.get("params", {})
 
-        # First try custom modules in current module
         if custom_module and hasattr(custom_module, layer_type):
             layer_class = getattr(custom_module, layer_type)
-        # Then try custom classes in current module
         elif custom_module and layer_type in globals():
             layer_class = globals()[layer_type]
-        # Then try PyTorch nn module
         else:
             layer_class = getattr(nn, layer_type)
 
@@ -855,16 +852,41 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
 class LuminanceEncoder(nn.Module):
     def __init__(self, encoder_module: Optional[nn.Module] = None, config_path: Optional[str] = None):
         super().__init__()
-        self.feature_outputs = []  # Store inputs to downsampling blocks
+        self.feature_outputs = []
+        self.downsample_channels = []
 
         if encoder_module is not None:
             self.layers = encoder_module
+            self._analyzeChannelsFromModule(encoder_module)
         elif config_path is not None:
-            self.layers = self._buildEncoderFromConfig(config_path)
+            self.layers = self.buildEncoderFromConfig(config_path)
+            self._analyzeChannelsFromConfig(config_path)
         else:
-            self.layers = self._buildDefaultEncoder()
+            self.layers = self.buildDefaultEncoder()
+            self.downsample_channels = [64, 128, 256, 512]
 
-    def _buildDefaultEncoder(self) -> nn.Module:
+    def _analyzeChannelsFromModule(self, module: nn.Module):
+        for layer in module:
+            if isinstance(layer, nn.Conv2d) and hasattr(layer, 'stride'):
+                if (isinstance(layer.stride, int) and layer.stride > 1) or \
+                   (isinstance(layer.stride, tuple) and any(s > 1 for s in layer.stride)):
+                    self.downsample_channels.append(layer.out_channels)
+
+    def _analyzeChannelsFromConfig(self, config_path: str):
+        try:
+            with open(config_path, 'r') as f:
+                architecture = json.load(f)
+
+            for layer_config in architecture:
+                layer_type = layer_config["type"]
+                params = layer_config.get("params", {})
+
+                if layer_type == "Conv2d" and params.get("stride", 1) > 1:
+                    self.downsample_channels.append(params["out_channels"])
+        except Exception as e:
+            raise RuntimeError(f"Failed to analyze channels from config {config_path}: {e}")
+
+    def buildDefaultEncoder(self) -> nn.Module:
         return nn.Sequential(
             nn.Conv2d(1, 64, kernel_size=3, stride=2, padding=1),
             nn.GELU(),
@@ -876,7 +898,7 @@ class LuminanceEncoder(nn.Module):
             nn.GELU(),
         )
 
-    def _buildEncoderFromConfig(self, config_path: str) -> nn.Module:
+    def buildEncoderFromConfig(self, config_path: str) -> nn.Module:
         try:
             with open(config_path, 'r') as f:
                 architecture = json.load(f)
@@ -889,12 +911,10 @@ class LuminanceEncoder(nn.Module):
         current = x
 
         if not isinstance(self.layers, nn.Sequential):
-            # Custom module returns feature_outputs, output
             if hasattr(self.layers, 'forward') and self.layers.forward.__code__.co_argcount == 1:
                 result = self.layers(x)
                 if result and isinstance(result, list):
                     return result
-            # Fallback: custom module doesn't return feature outputs
             raise ValueError("Custom encoder module must return feature_outputs list.")
 
         for layer in self.layers:
@@ -912,24 +932,32 @@ class LuminanceEncoder(nn.Module):
 
         return self.feature_outputs
 
+    def getDownsampleChannels(self) -> List[int]:
+        return self.downsample_channels
+
+    def getNumDownsampleLayers(self) -> int:
+        return len(self.downsample_channels)
+
 
 class PixelDecoder(nn.Module):
     def __init__(self,
+                 encoder_channels: List[int],
                  embed_dim: int = 512,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
-                 dropout: float = 0.1,
-                 num_layers: int = 6,
-                 patch_size: int = 16):
+                 dropout: float = 0.1):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
-        self.num_layers = num_layers
+        self.num_layers = len(encoder_channels)
 
-        self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(
-                dim=embed_dim,
+        self.transformer_blocks = nn.ModuleList()
+        decoder_channels = list(reversed(encoder_channels))
+
+        for i in range(self.num_layers):
+            current_dim = decoder_channels[i]
+            transformer_block = TransformerBlock(
+                dim=current_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
@@ -937,98 +965,88 @@ class PixelDecoder(nn.Module):
                 use_cross_attention=False,
                 use_causal_mask=False
             )
-            for _ in range(num_layers)
-        ])
+            self.transformer_blocks.append(transformer_block)
 
-        self.upsample_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(embed_dim, embed_dim * 4, kernel_size=3, padding=1),  # [B, embed_dim*4, H, W]
-                nn.PixelShuffle(2),  # [B, embed_dim, H*2, W*2] - reduces channels by 4x, increases spatial by 2x
-                nn.GELU(),
-                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),  # [B, embed_dim, H*2, W*2]
+        self.upsample_layers = nn.ModuleList()
+        self.output_projections = nn.ModuleList()
+
+        for i in range(self.num_layers):
+            in_channels = decoder_channels[i]
+            out_channels = decoder_channels[i+1] if i < self.num_layers - 1 else embed_dim
+
+            upsample_layer = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),  # [B, out_channels*4, H, W]
+                nn.PixelShuffle(2),  # [B, out_channels, H*2, W*2]
                 nn.GELU()
             )
-            for _ in range(num_layers)
-        ])
+            self.upsample_layers.append(upsample_layer)
 
-        self.residual_projections = nn.ModuleList()
+            if decoder_channels[i] != self.embed_dim:
+                self.output_projections.append(nn.Linear(decoder_channels[i], self.embed_dim))
+            else:
+                self.output_projections.append(nn.Identity())
 
-        self.encoder_output_projection = None
+        self.feature_embed = nn.Embedding(self.num_layers, self.embed_dim)
 
-        self.feature_embed = nn.Embedding(num_layers, embed_dim)
+        final_out_channels = decoder_channels[-1] if decoder_channels[-1] != embed_dim else embed_dim
+        if final_out_channels != self.embed_dim:
+            self.final_proj = nn.Conv2d(final_out_channels, self.embed_dim, kernel_size=1)
+        else:
+            self.final_proj = nn.Identity()
 
-    def forward(self,
-                encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
-
+    def forward(self, encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
         batch_size = encoder_outputs[0].shape[0]
         device = encoder_outputs[0].device
 
-        # Initialize encoder output projection once
-        if self.encoder_output_projection is None:
-            output_channels = encoder_outputs[-1].shape[1]
-            self.encoder_output_projection = nn.Linear(output_channels, self.embed_dim).to(device)
-
-        # Initialize residual projection layers dynamically
-        if len(self.residual_projections) == 0 and encoder_outputs:
-            for i in range(self.num_layers):
-                # For residual connections: project encoder inputs
-                residual_idx = min(i, len(encoder_outputs) - 1)
-                residual_channels = encoder_outputs[-(residual_idx + 1)].shape[1]  # Reverse order
-                self.residual_projections.append(
-                    nn.Conv2d(residual_channels, self.embed_dim, kernel_size=1).to(device)
-                )
-
         pixel_decoder_outputs = []
 
-        # Start with the encoder output as initial features
         b, c, h_enc, w_enc = encoder_outputs[-1].shape
-        encoder_patches = encoder_outputs[-1].view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, c]
-        encoder_patches = self.encoder_output_projection(encoder_patches)  # [batch_size, num_patches, embed_dim]
-
-        current_features = encoder_patches
+        current_features = encoder_outputs[-1].view(b, c, -1).transpose(1, 2)  # [batch_size, h_enc*w_enc, decoder_channels[0]]
 
         for i in range(self.num_layers):
-            # Get corresponding residual input from encoder (reverse order)
-            if encoder_outputs and i < len(encoder_outputs) and i > 0:
-                residual_idx = min(i, len(encoder_outputs) - 1)
-                residual_input = encoder_outputs[-(residual_idx + 1)]  # [batch_size, channels, H_res, W_res]
+            if i >= 1:
+                residual_input = encoder_outputs[-(i+1)]  # [batch_size, decoder_channels[i], H_res, W_res]
 
-                residual_projected = self.residual_projections[i](residual_input)  # [batch_size, embed_dim, H_res, W_res]
-                b_res, c_res, h_res, w_res = residual_projected.shape
-
-                residual_patches = residual_projected.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, num_patches, embed_dim]
+                b_res, c_res, h_res, w_res = residual_input.shape
+                residual_patches = residual_input.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, h_res*w_res, decoder_channels[i]]
 
                 transformer_input = current_features + residual_patches
-
                 h_res = residual_input.shape[2]
                 w_res = residual_input.shape[3]
             else:
                 transformer_input = current_features
-                h_res = int(current_features.shape[1] ** 0.5)
-                w_res = h_res
+                h_res = h_enc
+                w_res = w_enc
 
-            pos_encoding = distancePositionalEncoding(h_res, w_res, self.embed_dim, device)  # [1, num_patches, embed_dim]
+            pos_encoding = distancePositionalEncoding(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
             transformer_input_with_pos = transformer_input + pos_encoding
 
-            transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, num_patches, embed_dim]
+            transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
 
             b, n_patches, c = transformer_output.shape
-            h_current = int(n_patches ** 0.5)
-            w_current = h_current
-            spatial_features = transformer_output.transpose(1, 2).view(b, c, h_current, w_current)  # [batch_size, embed_dim, h, w]
+            spatial_features = transformer_output.transpose(1, 2).view(b, c, h_res, w_res)  # [batch_size, decoder_channels[i], h_res, w_res]
 
-            upsampled_features = self.upsample_layers[i](spatial_features)  # [batch_size, embed_dim, h_up, w_up]
+            upsampled_features = self.upsample_layers[i](spatial_features)  # [batch_size, out_channels, h_up, w_up]
 
-            b, c, h_up, w_up = upsampled_features.shape
-            current_features = upsampled_features.view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, embed_dim]
+            b, c_up, h_up, w_up = upsampled_features.shape
+
+            output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
+            output_features = self.output_projections[i](output_features)  # [batch_size, h_up*w_up, embed_dim]
 
             feature_embed = self.feature_embed(torch.tensor(i, device=device))
             feature_embed = feature_embed.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, 1, embed_dim]
 
-            if i < self.num_layers - 1:
-                pixel_decoder_outputs.append(current_features + feature_embed)
+            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, embed_dim]
+            pixel_decoder_outputs.append(output_features_with_embed)
 
-        final_pixel_output = current_features
+            current_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
+
+        b, n_patches, c_final = current_features.shape
+        h_final = h_enc * (2 ** self.num_layers)
+        w_final = w_enc * (2 ** self.num_layers)
+        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, last_decoder_channels, h_final, w_final]
+
+        final_pixel_output = self.final_proj(final_pixel_spatial)  # [batch_size, embed_dim, h_final, w_final]
 
         return pixel_decoder_outputs, final_pixel_output
 
@@ -1050,8 +1068,9 @@ class MultiScaleColorDecoder(nn.Module):
         self.color_embeddings = nn.Embedding(memory_size, embed_dim)
         nn.init.zeros_(self.color_embeddings.weight)
 
-        self.memory_embeddings = nn.Embedding(memory_size, embed_dim)  # [memory_size, embed_dim]
+        self.memory_embeddings = nn.Embedding(memory_size, embed_dim)
         nn.init.zeros_(self.memory_embeddings.weight)
+
         self.decoder_blocks = nn.ModuleList()
         for i in range(num_layers):
             decoder_block = nn.ModuleDict({
@@ -1133,9 +1152,7 @@ class ColorMemoryTransformer(nn.Module):
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
-                 pixel_decoder_layers: int = 6,
                  color_decoder_layers: int = 6,
-                 patch_size: int = 16,
                  memory_size: int = 256,
                  smoothing_config_path: str = None,
                  encoder_module: Optional[nn.Module] = None,
@@ -1143,20 +1160,22 @@ class ColorMemoryTransformer(nn.Module):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
         self.memory_size = memory_size
-        self.pixel_decoder_layers = pixel_decoder_layers
         self.color_decoder_layers = color_decoder_layers
 
         self.luminance_encoder = LuminanceEncoder(encoder_module, encoder_config_path)
+        encoder_channels = self.luminance_encoder.getDownsampleChannels()
+
         self.pixel_decoder = PixelDecoder(
+            encoder_channels=encoder_channels,
             embed_dim=embed_dim,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
-            dropout=dropout,
-            num_layers=pixel_decoder_layers,
-            patch_size=patch_size
+            dropout=dropout
         )
+
+        self.pixel_decoder_layers = self.pixel_decoder.num_layers
+
         self.color_decoder = MultiScaleColorDecoder(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -1166,16 +1185,9 @@ class ColorMemoryTransformer(nn.Module):
             memory_size=memory_size
         )
 
-        self.pixel_upsample = PatchUpsample(
-            patch_size=patch_size,
-            embed_dim=embed_dim,
-            out_channels=embed_dim,
-            upsample=False
-        )
+        self.smoothing_layers = self.loadSmoothingNetwork(smoothing_config_path)
 
-        self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
-
-    def _loadSmoothingNetwork(self, config_path: str) -> nn.Module:
+    def loadSmoothingNetwork(self, config_path: str) -> nn.Module:
         if config_path is None:
             default_config = [
                 {"type": "Conv2d", "params": {"in_channels": self.memory_size, "out_channels": 64, "kernel_size": 3, "padding": 1}},
@@ -1198,9 +1210,6 @@ class ColorMemoryTransformer(nn.Module):
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         batch_size, channels, h, w = img.shape
 
-        if h % self.patch_size != 0 or w % self.patch_size != 0:
-            raise ValueError("Image size must be divisible by patch_size")
-
         if channels == 3:
             luminance = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
         elif channels == 1:
@@ -1210,17 +1219,12 @@ class ColorMemoryTransformer(nn.Module):
 
         encoder_outputs = self.luminance_encoder(luminance)
 
-        pixel_decoder_outputs, final_pixel_output = self.pixel_decoder(
-            encoder_outputs
-        )
+        pixel_decoder_outputs, final_pixel_output = self.pixel_decoder(encoder_outputs)  # final_pixel_output: [batch_size, embed_dim, H, W]
 
         color_decoder_output = self.color_decoder(pixel_decoder_outputs)  # [batch_size, memory_size, embed_dim]
 
-        pixel_features = self.pixel_upsample(final_pixel_output)  # [batch_size, embed_dim, h, w]
-
-        output = torch.einsum("bqc,bchw->bqhw", color_decoder_output, pixel_features)  # [batch_size, memory_size, h, w]
-
-        output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
+        output = torch.einsum("bqc,bchw->bqhw", color_decoder_output, final_pixel_output)  # [batch_size, memory_size, H, W]
+        output = self.smoothing_layers(output)  # [batch_size, 1, H, W]
 
         return output
 
