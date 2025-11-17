@@ -970,6 +970,8 @@ class PixelDecoder(nn.Module):
         self.upsample_layers = nn.ModuleList()
         self.output_projections = nn.ModuleList()
 
+        self.feature_embeddings = nn.ModuleList()
+
         for i in range(self.num_layers):
             in_channels = decoder_channels[i]
             out_channels = decoder_channels[i+1] if i < self.num_layers - 1 else embed_dim
@@ -981,12 +983,14 @@ class PixelDecoder(nn.Module):
             )
             self.upsample_layers.append(upsample_layer)
 
+            feature_embed = nn.Embedding(1, decoder_channels[i])
+            nn.init.zeros_(feature_embed.weight)
+            self.feature_embeddings.append(feature_embed)
+
             if decoder_channels[i] != self.embed_dim:
                 self.output_projections.append(nn.Linear(decoder_channels[i], self.embed_dim))
             else:
                 self.output_projections.append(nn.Identity())
-
-        self.feature_embed = nn.Embedding(self.num_layers, self.embed_dim)
 
         final_out_channels = decoder_channels[-1] if decoder_channels[-1] != embed_dim else embed_dim
         if final_out_channels != self.embed_dim:
@@ -1033,8 +1037,8 @@ class PixelDecoder(nn.Module):
             output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
             output_features = self.output_projections[i](output_features)  # [batch_size, h_up*w_up, embed_dim]
 
-            feature_embed = self.feature_embed(torch.tensor(i, device=device))
-            feature_embed = feature_embed.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, 1, embed_dim]
+            feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, decoder_channels[i]]
+            feature_embed = feature_embed.expand(batch_size, -1, -1)  # [batch_size, 1, decoder_channels[i]]
 
             output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, embed_dim]
             pixel_decoder_outputs.append(output_features_with_embed)
