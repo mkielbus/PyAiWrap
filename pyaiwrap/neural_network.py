@@ -988,7 +988,7 @@ class PixelDecoder(nn.Module):
             self.feature_embeddings.append(feature_embed)
 
             if decoder_channels[i] != self.embed_dim:
-                self.output_projections.append(nn.Linear(decoder_channels[i], self.embed_dim))
+                self.output_projections.append(nn.Linear(out_channels, self.embed_dim))
             else:
                 self.output_projections.append(nn.Identity())
 
@@ -1035,15 +1035,17 @@ class PixelDecoder(nn.Module):
             b, c_up, h_up, w_up = upsampled_features.shape
 
             output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
-            output_features = self.output_projections[i](output_features)  # [batch_size, h_up*w_up, embed_dim]
 
             feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, out_channels]
             feature_embed = feature_embed.expand(batch_size, output_features.size(1), -1)  # [batch_size, h_up*w_up, out_channels]
 
-            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, embed_dim]
-            pixel_decoder_outputs.append(output_features_with_embed)
+            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, c_up]
 
-            current_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
+            output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
+
+            pixel_decoder_outputs.append(output_features_projected)
+
+            current_features = output_features_with_embed  # [batch_size, h_up*w_up, c_up]
 
         b, n_patches, c_final = current_features.shape
         h_final = h_enc * (2 ** self.num_layers)
