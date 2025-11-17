@@ -974,7 +974,10 @@ class PixelDecoder(nn.Module):
 
         for i in range(self.num_layers):
             in_channels = decoder_channels[i]
-            out_channels = decoder_channels[i+1] if i < self.num_layers - 1 else embed_dim
+            if i < self.num_layers - 1:
+                out_channels = decoder_channels[i+1]
+            else:
+                out_channels = decoder_channels[i]
 
             upsample_layer = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),  # [B, out_channels*4, H, W]
@@ -992,11 +995,8 @@ class PixelDecoder(nn.Module):
             else:
                 self.output_projections.append(nn.Identity())
 
-        final_out_channels = decoder_channels[-1] if decoder_channels[-1] != embed_dim else embed_dim
-        if final_out_channels != self.embed_dim:
-            self.final_proj = nn.Conv2d(final_out_channels, self.embed_dim, kernel_size=1)
-        else:
-            self.final_proj = nn.Identity()
+        last_out_channels = decoder_channels[-1]
+        self.final_proj = nn.Conv2d(last_out_channels, self.embed_dim, kernel_size=1)
 
     def forward(self, encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
         batch_size = encoder_outputs[0].shape[0]
