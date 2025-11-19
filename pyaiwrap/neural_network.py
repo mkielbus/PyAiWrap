@@ -617,8 +617,7 @@ class ColorizationTransformerNet(nn.Module):
                  patch_size: int = 16,
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = False,
-                 output_channels: int = 3,
-                 num_color_tokens: int = 256,
+                 output_channels: int = 3
                  **kwargs):
         """
         Args:
@@ -639,7 +638,6 @@ class ColorizationTransformerNet(nn.Module):
         self.patch_size = patch_size
         self.output_channels = output_channels
         self.only_use_encoder = only_use_encoder
-        self.num_color_tokens = num_color_tokens
 
         # Grayscale embedding for encoder
         self.grayscale_embed = PatchEmbed(
