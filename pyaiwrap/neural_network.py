@@ -438,18 +438,6 @@ class PatchUpsample(nn.Module):
 
 
 class TransformerNet(nn.Module):
-    """
-    Complete Transformer Network: N Encoder Layers → N Decoder Layers → Output
-
-    Architecture:
-    - N Encoder layers (self-attention only, bidirectional)
-    - N Decoder layers (causal self-attention + cross-attention to encoder)
-    - Linear projection + Softmax
-
-    Follows "Attention is All You Need" architecture:
-    - Encoder processes input sequence
-    - Decoder processes target sequence (autoregressive) with cross-attention to encoder
-    """
     def __init__(self,
                  dim: int,
                  num_heads: int = 8,
@@ -458,22 +446,15 @@ class TransformerNet(nn.Module):
                  num_layers: int = 6,
                  output_dim: Optional[int] = None,
                  only_use_encoder: bool = False,
-                 use_decoder_masking: bool = True):
-        """
-        Args:
-            dim: Dimension of features throughout the network
-            num_heads: Number of attention heads
-            mlp_ratio: Expansion ratio for MLP
-            dropout: Dropout probability
-            num_layers: Number of encoder AND decoder layers (N each)
-            output_dim: Output dimension. If None, uses dim (for same shape output)
-        """
+                 use_decoder_masking: bool = True,
+                 use_layerwise_connections: bool = False):
         super().__init__()
 
         self.dim = dim
         self.num_layers = num_layers
         self.output_dim = output_dim if output_dim is not None else dim
         self._only_use_encoder = only_use_encoder
+        self.use_layerwise_connections = use_layerwise_connections
 
         # ===== ENCODER: N layers of self-attention =====
         self.encoder_layers = nn.ModuleList([
@@ -501,23 +482,19 @@ class TransformerNet(nn.Module):
                         embed_dim=dim,
                         num_heads=num_heads,
                         dropout=dropout,
-                        use_causal_mask=use_decoder_masking  # Causal mask - only for autoregressive!
+                        use_causal_mask=use_decoder_masking
                     ),
                     'norm1': nn.LayerNorm(dim),
-
-                    # Queries from decoder, Keys and Values from encoder output
                     'cross_attention': MultiHeadAttention(
                         query_dim=dim,
-                        key_dim=dim,  # From encoder
-                        value_dim=dim,  # From encoder
+                        key_dim=dim,
+                        value_dim=dim,
                         embed_dim=dim,
                         num_heads=num_heads,
                         dropout=dropout,
                         use_causal_mask=False
                     ),
                     'norm2': nn.LayerNorm(dim),
-
-                    # Position-wise Feed-Forward Network (MLP)
                     'mlp': nn.Sequential(
                         nn.Linear(dim, dim * mlp_ratio),
                         nn.GELU(),
@@ -529,7 +506,6 @@ class TransformerNet(nn.Module):
                 })
                 self.decoder_layers.append(decoder_layer)
 
-            # Learnable decoder start token
             self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
 
         self.output_projection = nn.Linear(dim, self.output_dim)
@@ -539,66 +515,60 @@ class TransformerNet(nn.Module):
                 encoder_input: torch.Tensor,
                 decoder_input: Optional[torch.Tensor] = None,
                 seq_length: Optional[int] = None) -> torch.Tensor:
-        """
-        Forward pass through encoder-decoder transformer.
-
-        Args:
-            encoder_input: [B, N_enc, D] - input to encoder (with positional encoding)
-            decoder_input: [B, N_dec, D] - optional decoder input (for teacher forcing)
-            seq_length: int - if decoder_input not provided, length of sequence to generate
-
-        Returns:
-            output: [B, N_dec, output_dim] - output sequence
-        """
+        
         batch_size = encoder_input.shape[0]
 
-        # encoder: N layers
-        encoder_output = encoder_input
-        for encoder_layer in self.encoder_layers:
-            encoder_output = encoder_layer(encoder_output)
-        # encoder_output: [B, N_enc, D] - "memory" for cross-attention
-        if not self._only_use_encoder:
-            # decoder: prepare input
+        if self.use_layerwise_connections and not self._only_use_encoder:
+            encoder_outputs = []
+            x = encoder_input
+            for encoder_layer in self.encoder_layers:
+                x = encoder_layer(x)
+                encoder_outputs.append(x)
+            final_encoder_output = encoder_outputs[-1]
+        else:
+            # Standard - only final output
+            encoder_output = encoder_input
+            for encoder_layer in self.encoder_layers:
+                encoder_output = encoder_layer(encoder_output)
+            final_encoder_output = encoder_output
+
+        if self._only_use_encoder:
+            decoder_output = final_encoder_output
+        else:
             if decoder_input is not None:
-                # Teacher forcing: use provided decoder input
                 decoder_output = decoder_input
             else:
-                # start with token that should be learned and repeat for sequence length
                 if seq_length is None:
-                    seq_length = encoder_input.shape[1]  # Same length as encoder by default
-
+                    seq_length = encoder_input.shape[1]
                 decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
-
                 pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
                 decoder_output = decoder_output + pos_encoding
 
-            # ===== DECODER: N layers =====
-            for decoder_layer in self.decoder_layers:
-                # 1. Self-attention (with optional causal mask for autoregressive)
+            for i, decoder_layer in enumerate(self.decoder_layers):
+                # Self-attention
                 self_attn_out = decoder_layer['self_attention'](query=decoder_output)
                 decoder_output = decoder_output + self_attn_out
                 decoder_output = decoder_layer['norm1'](decoder_output)
 
-                # 2. Cross-attention to encoder output
+                if self.use_layerwise_connections:
+                    encoder_feature = encoder_outputs[i]
+                else:
+                    encoder_feature = final_encoder_output
+
                 cross_attn_out = decoder_layer['cross_attention'](
-                    query=decoder_output,      # Queries from decoder
-                    key=encoder_output,        # Keys from encoder memory
-                    value=encoder_output       # Values from encoder memory
+                    query=decoder_output,
+                    key=encoder_feature,
+                    value=encoder_feature
                 )
                 decoder_output = decoder_output + cross_attn_out
                 decoder_output = decoder_layer['norm2'](decoder_output)
 
-                # 3. Position-wise Feed-Forward (MLP)
                 mlp_out = decoder_layer['mlp'](decoder_output)
                 decoder_output = decoder_output + mlp_out
                 decoder_output = decoder_layer['norm3'](decoder_output)
 
-        # ===== OUTPUT PROJECTION =====
-        if self._only_use_encoder:
-            decoder_output = encoder_output
-        output = self.output_projection(decoder_output)  # [B, N_dec or N_enc, output_dim]
-        output = self._output(output)  # [B, N_dec or N_enc, output_dim]
-
+        output = self.output_projection(decoder_output)
+        output = self._output(output)
         return output
 
 
@@ -657,7 +627,8 @@ class ColorizationTransformerNet(nn.Module):
             num_layers=num_layers,
             output_dim=embed_dim,
             use_decoder_masking=use_decoder_masking,
-            only_use_encoder=only_use_encoder
+            only_use_encoder=only_use_encoder,
+            use_layerwise_connections=True
         )
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
