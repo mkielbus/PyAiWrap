@@ -652,7 +652,7 @@ class ColorizationTransformerNet(nn.Module):
             color_patch_w = w // color_patch_size
             color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
-            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, num_color_tokens, embed_dim]
+            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
