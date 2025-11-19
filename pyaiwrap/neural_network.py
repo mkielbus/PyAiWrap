@@ -617,8 +617,7 @@ class ColorizationTransformerNet(nn.Module):
                  patch_size: int = 16,
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = False,
-                 output_channels: int = 3
-                 **kwargs):
+                 output_channels: int = 3):
         """
         Args:
             embed_dim: Dimension of patch embeddings
