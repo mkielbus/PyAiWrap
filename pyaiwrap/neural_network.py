@@ -650,6 +650,8 @@ class ColorizationTransformerNet(nn.Module):
             # Color embeddings for decoder input
             self.color_embedding = nn.Embedding(num_patches, embed_dim)
             self.color_pos_embed = nn.Embedding(num_patches, embed_dim)
+            nn.init.zeros_(self.color_embedding.weight)
+            nn.init.zeros_(self.color_pos_embed.weight)
 
         # Output projection
         self.patch_upsample = PatchUpsample(
