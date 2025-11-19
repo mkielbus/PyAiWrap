@@ -704,7 +704,7 @@ class ColorizationTransformerNet(nn.Module):
                 seq_length=None
             )
         else:
-            color_indices = torch.arange(self.num_color_tokens, device=img.device)
+            color_indices = torch.arange(patch_h*patch_w, device=img.device)
             color_embeddings = self.color_embedding(color_indices)  # [num_patches, embed_dim]
             color_pos = self.color_pos_embed(color_indices)  # [num_patches, embed_dim]
             decoder_input = (color_embeddings + color_pos).unsqueeze(0).expand(batch_size, -1, -1)
