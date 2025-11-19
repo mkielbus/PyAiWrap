@@ -713,7 +713,7 @@ class ColorizationTransformerNet(nn.Module):
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
                 decoder_input=decoder_input,
-                seq_length=self.num_color_tokens
+                seq_length=patch_h*patch_w
             )
 
         output = self.patch_upsample(output_embeddings)
