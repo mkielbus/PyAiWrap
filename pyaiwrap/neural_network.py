@@ -510,8 +510,7 @@ class TransformerNet(nn.Module):
 
     def forward(self,
                 encoder_input: torch.Tensor,
-                decoder_input: Optional[torch.Tensor] = None,
-                seq_length: Optional[int] = None) -> torch.Tensor:
+                decoder_input: Optional[torch.Tensor] = None) -> torch.Tensor:
         
         batch_size = encoder_input.shape[0]
 
@@ -571,19 +570,21 @@ class ColorizationTransformerNet(nn.Module):
                  num_layers: int = 6,
                  patch_size: int = 16,
                  num_color_tokens: int = 4096,
-                 image_size: int = 256,  # Add image_size parameter
+                 num_image_patches: int = 4096,
+                 image_size: int = 256,
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = False,
                  output_channels: int = 3):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
+        self.image_patches = num_image_patches
         self.output_channels = output_channels
         self.only_use_encoder = only_use_encoder
         self.num_color_tokens = num_color_tokens
         self.image_size = image_size
 
+        patch_size = image_size // int(num_image_patches ** 0.5)
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
             in_channels=1,
@@ -627,12 +628,14 @@ class ColorizationTransformerNet(nn.Module):
         else:
             grayscale_img = img
 
-        if h % self.patch_size != 0 or w % self.patch_size != 0:
-            raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({self.patch_size})")
+        patch_size = self.image_size // int(self.image_patches ** 0.5)
+        color_patch_size = self.image_size // int(self.num_color_tokens ** 0.5)
+        if h % patch_size != 0 or w % patch_size != 0 or h % color_patch_size != 0 or w % color_patch_size != 0:
+            raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({patch_size}) and color_patch_size ({color_patch_size})")
 
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
-        patch_h = h // self.patch_size
-        patch_w = w // self.patch_size
+        patch_h = h // patch_size
+        patch_w = w // patch_size
         
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
@@ -640,21 +643,21 @@ class ColorizationTransformerNet(nn.Module):
         if self.only_use_encoder:
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
-                decoder_input=None,
-                seq_length=None
+                decoder_input=None
             )  # [B, num_patches, embed_dim]
             output = self.patch_upsample(output_embeddings)  # [B, output_channels, H, W]
         else:
             color_indices = torch.arange(self.num_color_tokens, device=img.device)
             color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
-            color_pos = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
+            color_patch_h = h // color_patch_size
+            color_patch_w = w // color_patch_size
+            color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
             decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
-                decoder_input=decoder_input,
-                seq_length=self.num_color_tokens
+                decoder_input=decoder_input
             )  # [B, num_color_tokens, embed_dim]
 
             output = self.color_upsample(output_embeddings)  # [B, output_channels, H, W]
