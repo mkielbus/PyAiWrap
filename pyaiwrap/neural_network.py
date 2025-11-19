@@ -568,7 +568,6 @@ class ColorizationTransformerNet(nn.Module):
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
                  num_layers: int = 6,
-                 patch_size: int = 16,
                  num_color_tokens: int = 4096,
                  num_image_patches: int = 4096,
                  image_size: int = 256,
