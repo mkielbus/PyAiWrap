@@ -506,10 +506,7 @@ class TransformerNet(nn.Module):
                 })
                 self.decoder_layers.append(decoder_layer)
 
-            self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
-
         self.output_projection = nn.Linear(dim, self.output_dim)
-        self._output = nn.Identity()
 
     def forward(self,
                 encoder_input: torch.Tensor,
@@ -526,7 +523,6 @@ class TransformerNet(nn.Module):
                 encoder_outputs.append(x)
             final_encoder_output = encoder_outputs[-1]
         else:
-            # Standard - only final output
             encoder_output = encoder_input
             for encoder_layer in self.encoder_layers:
                 encoder_output = encoder_layer(encoder_output)
@@ -538,14 +534,9 @@ class TransformerNet(nn.Module):
             if decoder_input is not None:
                 decoder_output = decoder_input
             else:
-                if seq_length is None:
-                    seq_length = encoder_input.shape[1]
-                decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
-                pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
-                decoder_output = decoder_output + pos_encoding
+                raise ValueError("Decoder input is None")
 
             for i, decoder_layer in enumerate(self.decoder_layers):
-                # Self-attention
                 self_attn_out = decoder_layer['self_attention'](query=decoder_output)
                 decoder_output = decoder_output + self_attn_out
                 decoder_output = decoder_layer['norm1'](decoder_output)
@@ -568,7 +559,6 @@ class TransformerNet(nn.Module):
                 decoder_output = decoder_layer['norm3'](decoder_output)
 
         output = self.output_projection(decoder_output)
-        output = self._output(output)
         return output
 
 
@@ -602,9 +592,7 @@ class ColorizationTransformerNet(nn.Module):
 
         if not only_use_encoder:
             self.color_embedding = nn.Embedding(num_color_tokens, embed_dim)
-            self.color_pos_embed = nn.Embedding(num_color_tokens, embed_dim)
             nn.init.normal_(self.color_embedding.weight, std=0.02)
-            nn.init.normal_(self.color_pos_embed.weight, std=0.02)
 
             color_patch_size = image_size // int(num_color_tokens ** 0.5)
             self.color_upsample = PatchUpsample(
@@ -659,9 +647,9 @@ class ColorizationTransformerNet(nn.Module):
         else:
             color_indices = torch.arange(self.num_color_tokens, device=img.device)
             color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
-            color_pos = self.color_pos_embed(color_indices)  # [num_color_tokens, embed_dim]
+            color_pos = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
-            decoder_input = color_embeddings.unsqueeze(0).expand(batch_size, -1, -1) + color_pos.unsqueeze(0).expand(batch_size, -1, -1)  # [B, num_color_tokens, embed_dim]
+            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
