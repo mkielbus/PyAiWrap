@@ -689,9 +689,8 @@ class ColorizationTransformerNet(nn.Module):
             color_indices = torch.arange(self.num_color_tokens, device=img.device)
             color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
             color_pos = self.color_pos_embed(color_indices)  # [num_color_tokens, embed_dim]
-            
-            decoder_input = torch.einsum("bpc,qc->bqc", grayscale_patches, color_embeddings)  # [B, num_color_tokens, embed_dim]
-            decoder_input = decoder_input + color_pos.unsqueeze(0)  # [B, num_color_tokens, embed_dim]
+
+            decoder_input = color_embeddings.unsqueeze(0).expand(batch_size, -1, -1) + color_pos.unsqueeze(0).expand(batch_size, -1, -1)  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
