@@ -615,6 +615,7 @@ class ColorizationTransformerNet(nn.Module):
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  patch_size: int = 16,
+                 num_patches: int = 4096,
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = False,
                  output_channels: int = 3):
@@ -647,8 +648,8 @@ class ColorizationTransformerNet(nn.Module):
 
         if not only_use_encoder:
             # Color embeddings for decoder input
-            self.color_embedding = nn.Embedding(self.patch_size, embed_dim)
-            self.color_pos_embed = nn.Embedding(self.patch_size, embed_dim)
+            self.color_embedding = nn.Embedding(num_patches, embed_dim)
+            self.color_pos_embed = nn.Embedding(num_patches, embed_dim)
 
         # Output projection
         self.patch_upsample = PatchUpsample(
