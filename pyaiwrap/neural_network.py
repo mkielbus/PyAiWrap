@@ -603,11 +603,6 @@ class TransformerNet(nn.Module):
 
 
 class ColorizationTransformerNet(nn.Module):
-    """
-    Transformer net for grayscale to RGB colorization.
-    Uses learnable color embeddings as decoder input.
-    """
-
     def __init__(self,
                  embed_dim: int = 512,
                  num_heads: int = 8,
@@ -615,31 +610,20 @@ class ColorizationTransformerNet(nn.Module):
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  patch_size: int = 16,
-                 num_patches: int = 4096,
+                 num_color_tokens: int = 4096,
+                 image_size: int = 256,  # Add image_size parameter
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = False,
                  output_channels: int = 3):
-        """
-        Args:
-            embed_dim: Dimension of patch embeddings
-            num_heads: Number of attention heads
-            mlp_ratio: Expansion ratio for MLP
-            dropout: Dropout probability
-            num_layers: Number of encoder AND decoder layers
-            patch_size: Size of image patches
-            use_decoder_masking: Whether to use causal masking in decoder
-            only_use_encoder: If True, only use encoder (no color embeddings)
-            output_channels: Number of output channels (3 for RGB)
-            num_color_tokens: Number of learnable color tokens for decoder
-        """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.output_channels = output_channels
         self.only_use_encoder = only_use_encoder
+        self.num_color_tokens = num_color_tokens
+        self.image_size = image_size
 
-        # Grayscale embedding for encoder
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
             in_channels=1,
@@ -647,18 +631,23 @@ class ColorizationTransformerNet(nn.Module):
         )
 
         if not only_use_encoder:
-            # Color embeddings for decoder input
-            self.color_embedding = nn.Embedding(num_patches, embed_dim)
-            self.color_pos_embed = nn.Embedding(num_patches, embed_dim)
-            nn.init.zeros_(self.color_embedding.weight)
-            nn.init.zeros_(self.color_pos_embed.weight)
+            self.color_embedding = nn.Embedding(num_color_tokens, embed_dim)
+            self.color_pos_embed = nn.Embedding(num_color_tokens, embed_dim)
+            nn.init.normal_(self.color_embedding.weight, std=0.02)
+            nn.init.normal_(self.color_pos_embed.weight, std=0.02)
 
-        # Output projection
-        self.patch_upsample = PatchUpsample(
-            patch_size=patch_size,
-            embed_dim=embed_dim,
-            out_channels=output_channels
-        )
+            color_patch_size = image_size // int(num_color_tokens ** 0.5)
+            self.color_upsample = PatchUpsample(
+                patch_size=color_patch_size,
+                embed_dim=embed_dim,
+                out_channels=output_channels
+            )
+        else:
+            self.patch_upsample = PatchUpsample(
+                patch_size=patch_size,
+                embed_dim=embed_dim,
+                out_channels=output_channels
+            )
 
         self.transformer = TransformerNet(
             dim=embed_dim,
@@ -672,19 +661,8 @@ class ColorizationTransformerNet(nn.Module):
         )
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass - accepts either grayscale or RGB input.
-        If RGB input is provided, it's converted to grayscale for encoding.
-        
-        Args:
-            img: [B, C, H, W] - input image (grayscale or RGB)
-            
-        Returns:
-            output: [B, output_channels, H, W] - colorized output
-        """
         batch_size, channels, h, w = img.shape
         
-        # Convert to grayscale if RGB input
         if channels == 3:
             grayscale_img = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
         else:
@@ -693,10 +671,10 @@ class ColorizationTransformerNet(nn.Module):
         if h % self.patch_size != 0 or w % self.patch_size != 0:
             raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({self.patch_size})")
 
-        # Encode grayscale patches
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
         patch_h = h // self.patch_size
         patch_w = w // self.patch_size
+        
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
@@ -705,22 +683,25 @@ class ColorizationTransformerNet(nn.Module):
                 encoder_input=encoder_input,
                 decoder_input=None,
                 seq_length=None
-            )
+            )  # [B, num_patches, embed_dim]
+            output = self.patch_upsample(output_embeddings)  # [B, output_channels, H, W]
         else:
-            color_indices = torch.arange(patch_h*patch_w, device=img.device)
-            color_embeddings = self.color_embedding(color_indices)  # [num_patches, embed_dim]
-            color_pos = self.color_pos_embed(color_indices)  # [num_patches, embed_dim]
-            decoder_input = (color_embeddings + color_pos).unsqueeze(0).expand(batch_size, -1, -1)
+            color_indices = torch.arange(self.num_color_tokens, device=img.device)
+            color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
+            color_pos = self.color_pos_embed(color_indices)  # [num_color_tokens, embed_dim]
+            
+            decoder_input = torch.einsum("bpc,qc->bqc", grayscale_patches, color_embeddings)  # [B, num_color_tokens, embed_dim]
+            decoder_input = decoder_input + color_pos.unsqueeze(0)  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
                 decoder_input=decoder_input,
-                seq_length=patch_h*patch_w
-            )
+                seq_length=self.num_color_tokens
+            )  # [B, num_color_tokens, embed_dim]
 
-        output = self.patch_upsample(output_embeddings)
+            output = self.color_upsample(output_embeddings)  # [B, output_channels, H, W]
+
         return output
-
 
 class NeuralNetworkLayer(nn.Module):
     """
