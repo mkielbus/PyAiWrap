@@ -438,18 +438,6 @@ class PatchUpsample(nn.Module):
 
 
 class TransformerNet(nn.Module):
-    """
-    Complete Transformer Network: N Encoder Layers → N Decoder Layers → Output
-
-    Architecture:
-    - N Encoder layers (self-attention only, bidirectional)
-    - N Decoder layers (causal self-attention + cross-attention to encoder)
-    - Linear projection + Softmax
-
-    Follows "Attention is All You Need" architecture:
-    - Encoder processes input sequence
-    - Decoder processes target sequence (autoregressive) with cross-attention to encoder
-    """
     def __init__(self,
                  dim: int,
                  num_heads: int = 8,
@@ -458,22 +446,15 @@ class TransformerNet(nn.Module):
                  num_layers: int = 6,
                  output_dim: Optional[int] = None,
                  only_use_encoder: bool = False,
-                 use_decoder_masking: bool = True):
-        """
-        Args:
-            dim: Dimension of features throughout the network
-            num_heads: Number of attention heads
-            mlp_ratio: Expansion ratio for MLP
-            dropout: Dropout probability
-            num_layers: Number of encoder AND decoder layers (N each)
-            output_dim: Output dimension. If None, uses dim (for same shape output)
-        """
+                 use_decoder_masking: bool = True,
+                 use_layerwise_connections: bool = False):
         super().__init__()
 
         self.dim = dim
         self.num_layers = num_layers
         self.output_dim = output_dim if output_dim is not None else dim
         self._only_use_encoder = only_use_encoder
+        self.use_layerwise_connections = use_layerwise_connections
 
         # ===== ENCODER: N layers of self-attention =====
         self.encoder_layers = nn.ModuleList([
@@ -501,23 +482,19 @@ class TransformerNet(nn.Module):
                         embed_dim=dim,
                         num_heads=num_heads,
                         dropout=dropout,
-                        use_causal_mask=use_decoder_masking  # Causal mask - only for autoregressive!
+                        use_causal_mask=use_decoder_masking
                     ),
                     'norm1': nn.LayerNorm(dim),
-
-                    # Queries from decoder, Keys and Values from encoder output
                     'cross_attention': MultiHeadAttention(
                         query_dim=dim,
-                        key_dim=dim,  # From encoder
-                        value_dim=dim,  # From encoder
+                        key_dim=dim,
+                        value_dim=dim,
                         embed_dim=dim,
                         num_heads=num_heads,
                         dropout=dropout,
                         use_causal_mask=False
                     ),
                     'norm2': nn.LayerNorm(dim),
-
-                    # Position-wise Feed-Forward Network (MLP)
                     'mlp': nn.Sequential(
                         nn.Linear(dim, dim * mlp_ratio),
                         nn.GELU(),
@@ -529,132 +506,104 @@ class TransformerNet(nn.Module):
                 })
                 self.decoder_layers.append(decoder_layer)
 
-            # Learnable decoder start token
-            self.decoder_start_token = nn.Parameter(torch.randn(1, 1, dim))
-
         self.output_projection = nn.Linear(dim, self.output_dim)
-        self._output = nn.Identity()
 
     def forward(self,
                 encoder_input: torch.Tensor,
-                decoder_input: Optional[torch.Tensor] = None,
-                seq_length: Optional[int] = None) -> torch.Tensor:
-        """
-        Forward pass through encoder-decoder transformer.
+                decoder_input: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        Args:
-            encoder_input: [B, N_enc, D] - input to encoder (with positional encoding)
-            decoder_input: [B, N_dec, D] - optional decoder input (for teacher forcing)
-            seq_length: int - if decoder_input not provided, length of sequence to generate
+        if self.use_layerwise_connections and not self._only_use_encoder:
+            encoder_outputs = []
+            x = encoder_input
+            for encoder_layer in self.encoder_layers:
+                x = encoder_layer(x)
+                encoder_outputs.append(x)
+            final_encoder_output = encoder_outputs[-1]
+        else:
+            encoder_output = encoder_input
+            for encoder_layer in self.encoder_layers:
+                encoder_output = encoder_layer(encoder_output)
+            final_encoder_output = encoder_output
 
-        Returns:
-            output: [B, N_dec, output_dim] - output sequence
-        """
-        batch_size = encoder_input.shape[0]
-
-        # encoder: N layers
-        encoder_output = encoder_input
-        for encoder_layer in self.encoder_layers:
-            encoder_output = encoder_layer(encoder_output)
-        # encoder_output: [B, N_enc, D] - "memory" for cross-attention
-        if not self._only_use_encoder:
-            # decoder: prepare input
+        if self._only_use_encoder:
+            decoder_output = final_encoder_output
+        else:
             if decoder_input is not None:
-                # Teacher forcing: use provided decoder input
                 decoder_output = decoder_input
             else:
-                # start with token that should be learned and repeat for sequence length
-                if seq_length is None:
-                    seq_length = encoder_input.shape[1]  # Same length as encoder by default
+                raise ValueError("Decoder input is None")
 
-                decoder_output = self.decoder_start_token.repeat(batch_size, seq_length, 1)
-
-                pos_encoding = distancePositionalEncoding(seq_length, 1, self.dim, encoder_input.device)
-                decoder_output = decoder_output + pos_encoding
-
-            # ===== DECODER: N layers =====
-            for decoder_layer in self.decoder_layers:
-                # 1. Self-attention (with optional causal mask for autoregressive)
+            for i, decoder_layer in enumerate(self.decoder_layers):
                 self_attn_out = decoder_layer['self_attention'](query=decoder_output)
                 decoder_output = decoder_output + self_attn_out
                 decoder_output = decoder_layer['norm1'](decoder_output)
 
-                # 2. Cross-attention to encoder output
+                if self.use_layerwise_connections:
+                    encoder_feature = encoder_outputs[i]
+                else:
+                    encoder_feature = final_encoder_output
+
                 cross_attn_out = decoder_layer['cross_attention'](
-                    query=decoder_output,      # Queries from decoder
-                    key=encoder_output,        # Keys from encoder memory
-                    value=encoder_output       # Values from encoder memory
+                    query=decoder_output,
+                    key=encoder_feature,
+                    value=encoder_feature
                 )
                 decoder_output = decoder_output + cross_attn_out
                 decoder_output = decoder_layer['norm2'](decoder_output)
 
-                # 3. Position-wise Feed-Forward (MLP)
                 mlp_out = decoder_layer['mlp'](decoder_output)
                 decoder_output = decoder_output + mlp_out
                 decoder_output = decoder_layer['norm3'](decoder_output)
 
-        # ===== OUTPUT PROJECTION =====
-        if self._only_use_encoder:
-            decoder_output = encoder_output
-        output = self.output_projection(decoder_output)  # [B, N_dec or N_enc, output_dim]
-        output = self._output(output)  # [B, N_dec or N_enc, output_dim]
-
+        output = self.output_projection(decoder_output)
         return output
 
 
 class ColorizationTransformerNet(nn.Module):
-    """
-    Specialized transformer for grayscale to RGB/single-channel colorization.
-    Uses encoder-decoder architecture with proper separation of grayscale context and color generation.
-    Implements scheduled sampling to bridge training-inference gap.
-    """
-
     def __init__(self,
                  embed_dim: int = 512,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
                  num_layers: int = 6,
-                 patch_size: int = 16,
+                 num_color_tokens: int = 4096,
+                 num_image_patches: int = 4096,
+                 image_size: int = 256,
                  use_decoder_masking: bool = False,
-                 only_use_encoder: bool = True,
-                 output_channels: int = 3,
-                 **kwargs):
-        """
-        Args:
-            embed_dim: Dimension of patch embeddings
-            num_heads: Number of attention heads
-            mlp_ratio: Expansion ratio for MLP
-            dropout: Dropout probability
-            num_layers: Number of encoder AND decoder layers
-            patch_size: Size of image patches
-            use_decoder_masking: Whether to use causal masking in decoder
-            output_channels: Number of output channels (1 for single channel, 3 for RGB)
-        """
+                 only_use_encoder: bool = False,
+                 output_channels: int = 3):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
+        self.image_patches = num_image_patches
         self.output_channels = output_channels
-        self._only_use_encoder = only_use_encoder
+        self.only_use_encoder = only_use_encoder
+        self.num_color_tokens = num_color_tokens
+        self.image_size = image_size
 
+        patch_size = image_size // int(num_image_patches ** 0.5)
         self.grayscale_embed = PatchEmbed(
             patch_size=patch_size,
-            in_channels=1,  # Grayscale input
+            in_channels=1,
             embed_dim=embed_dim
         )
 
-        self.color_embed = PatchEmbed(
-            patch_size=patch_size,
-            in_channels=3,  # Dynamic output channels
-            embed_dim=embed_dim
-        )
+        if not only_use_encoder:
+            self.color_embedding = nn.Embedding(num_color_tokens, embed_dim)
+            nn.init.normal_(self.color_embedding.weight, std=0.02)
 
-        self.patch_upsample = PatchUpsample(
-            patch_size=patch_size,
-            embed_dim=output_channels,  # Dynamic output
-            out_channels=output_channels
-        )
+            color_patch_size = image_size // int(num_color_tokens ** 0.5)
+            self.color_upsample = PatchUpsample(
+                patch_size=color_patch_size,
+                embed_dim=embed_dim,
+                out_channels=output_channels
+            )
+        else:
+            self.patch_upsample = PatchUpsample(
+                patch_size=patch_size,
+                embed_dim=embed_dim,
+                out_channels=output_channels
+            )
 
         self.transformer = TransformerNet(
             dim=embed_dim,
@@ -662,86 +611,55 @@ class ColorizationTransformerNet(nn.Module):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             num_layers=num_layers,
-            output_dim=output_channels,
+            output_dim=embed_dim,
             use_decoder_masking=use_decoder_masking,
-            only_use_encoder=only_use_encoder
+            only_use_encoder=only_use_encoder,
+            use_layerwise_connections=True
         )
 
-    def forward(self,
-                grayscale_img: torch.Tensor,
-                rgb_img: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Forward pass for colorization with scheduled sampling.
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        batch_size, channels, h, w = img.shape
 
-        Args:
-            grayscale_img: [B, 1, H, W] - input grayscale image
-            target_rgb: [B, C, H, W] - target color image (for teacher forcing during training)
+        if channels == 3:
+            grayscale_img = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+        else:
+            grayscale_img = img
 
-        Returns:
-            output: [B, C, H, W] - colorized output image
-        """
-        batch_size, _, h, w = grayscale_img.shape
-        if h % self.patch_size != 0 or w % self.patch_size != 0:
-            raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({self.patch_size})")
-
-        patch_h = h // self.patch_size
-        patch_w = w // self.patch_size
-        num_patches = patch_h * patch_w
+        patch_size = self.image_size // int(self.image_patches ** 0.5)
+        color_patch_size = self.image_size // int(self.num_color_tokens ** 0.5)
+        if h % patch_size != 0 or w % patch_size != 0 or h % color_patch_size != 0 or w % color_patch_size != 0:
+            raise ValueError(f"Image size ({h}x{w}) must be divisible by patch_size ({patch_size}) and color_patch_size ({color_patch_size})")
 
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
+        patch_h = h // patch_size
+        patch_w = w // patch_size
+
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
-        if self._only_use_encoder:
-            decoder_input = None
-            current_seq_len = None
+        if self.only_use_encoder:
+            output_embeddings = self.transformer(
+                encoder_input=encoder_input,
+                decoder_input=None
+            )  # [B, num_patches, embed_dim]
+            output = self.patch_upsample(output_embeddings)  # [B, output_channels, H, W]
         else:
-            if rgb_img is None:
-                initial_colors = self._get_initial_colors(grayscale_img)
-                pred_patches = self.color_embed(initial_colors)
-                decoder_input = pred_patches
-            else:
-                pred_patches = self.color_embed(rgb_img)
-                decoder_input = pred_patches
-            current_seq_len = decoder_input.size(1)
-            color_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
-            decoder_input = decoder_input + color_pos_encoding[:, :current_seq_len, :]
+            color_indices = torch.arange(self.num_color_tokens, device=img.device)
+            color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
+            color_patch_h = h // color_patch_size
+            color_patch_w = w // color_patch_size
+            color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
-        color_embeddings = self.transformer(
-            encoder_input=encoder_input,
-            decoder_input=decoder_input,
-            seq_length=current_seq_len
-        )  # [B, seq_len, output_channels]
+            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos  # [B, num_color_tokens, embed_dim]
 
-        output = self.patch_upsample(color_embeddings)  # [B, output_channels, H, W]
+            output_embeddings = self.transformer(
+                encoder_input=encoder_input,
+                decoder_input=decoder_input
+            )  # [B, num_color_tokens, embed_dim]
+
+            output = self.color_upsample(output_embeddings)  # [B, output_channels, H, W]
 
         return output
-
-    def _get_initial_colors(self, grayscale_img: torch.Tensor) -> torch.Tensor:
-        """
-        Get initial color estimate with small variations to prevent mode collapse.
-        Args:
-            grayscale_img: [B, 1, H, W] input grayscale
-        Returns:
-            initial_colors: [B, C, H, W] initial color estimate
-        """
-        batch_size, _, h, w = grayscale_img.shape
-        if self.output_channels == 1:
-            noise = torch.randn_like(grayscale_img) * 0.05
-            initial_colors = torch.clamp(grayscale_img + noise, 0, 1)
-        else:
-            base = grayscale_img
-            noise_r = torch.randn_like(base) * 0.03
-            noise_g = torch.randn_like(base) * 0.03
-            noise_b = torch.randn_like(base) * 0.03
-
-            initial_colors = torch.cat([
-                torch.clamp(base + noise_r, 0, 1),      # Red channel
-                torch.clamp(base + noise_g, 0, 1),      # Green channel
-                torch.clamp(base + noise_b, 0, 1)       # Blue channel
-            ], dim=1)
-
-        return initial_colors
 
 
 class NeuralNetworkLayer(nn.Module):
@@ -838,13 +756,10 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
         layer_type = layer_config["type"]
         params = layer_config.get("params", {})
 
-        # First try custom modules in current module
         if custom_module and hasattr(custom_module, layer_type):
             layer_class = getattr(custom_module, layer_type)
-        # Then try custom classes in current module
         elif custom_module and layer_type in globals():
             layer_class = globals()[layer_type]
-        # Then try PyTorch nn module
         else:
             layer_class = getattr(nn, layer_type)
 
@@ -855,16 +770,41 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
 class LuminanceEncoder(nn.Module):
     def __init__(self, encoder_module: Optional[nn.Module] = None, config_path: Optional[str] = None):
         super().__init__()
-        self.feature_outputs = []  # Store inputs to downsampling blocks
+        self.feature_outputs = []
+        self.downsample_channels = []
 
         if encoder_module is not None:
             self.layers = encoder_module
+            self._analyzeChannelsFromModule(encoder_module)
         elif config_path is not None:
-            self.layers = self._buildEncoderFromConfig(config_path)
+            self.layers = self.buildEncoderFromConfig(config_path)
+            self._analyzeChannelsFromConfig(config_path)
         else:
-            self.layers = self._buildDefaultEncoder()
+            self.layers = self.buildDefaultEncoder()
+            self.downsample_channels = [64, 128, 256, 512]
 
-    def _buildDefaultEncoder(self) -> nn.Module:
+    def _analyzeChannelsFromModule(self, module: nn.Module):
+        for layer in module:
+            if isinstance(layer, nn.Conv2d) and hasattr(layer, 'stride'):
+                if (isinstance(layer.stride, int) and layer.stride > 1) or \
+                   (isinstance(layer.stride, tuple) and any(s > 1 for s in layer.stride)):
+                    self.downsample_channels.append(layer.out_channels)
+
+    def _analyzeChannelsFromConfig(self, config_path: str):
+        try:
+            with open(config_path, 'r') as f:
+                architecture = json.load(f)
+
+            for layer_config in architecture:
+                layer_type = layer_config["type"]
+                params = layer_config.get("params", {})
+
+                if layer_type == "Conv2d" and params.get("stride", 1) > 1:
+                    self.downsample_channels.append(params["out_channels"])
+        except Exception as e:
+            raise RuntimeError(f"Failed to analyze channels from config {config_path}: {e}")
+
+    def buildDefaultEncoder(self) -> nn.Module:
         return nn.Sequential(
             nn.Conv2d(1, 64, kernel_size=3, stride=2, padding=1),
             nn.GELU(),
@@ -876,7 +816,7 @@ class LuminanceEncoder(nn.Module):
             nn.GELU(),
         )
 
-    def _buildEncoderFromConfig(self, config_path: str) -> nn.Module:
+    def buildEncoderFromConfig(self, config_path: str) -> nn.Module:
         try:
             with open(config_path, 'r') as f:
                 architecture = json.load(f)
@@ -889,12 +829,10 @@ class LuminanceEncoder(nn.Module):
         current = x
 
         if not isinstance(self.layers, nn.Sequential):
-            # Custom module returns feature_outputs, output
             if hasattr(self.layers, 'forward') and self.layers.forward.__code__.co_argcount == 1:
                 result = self.layers(x)
                 if result and isinstance(result, list):
                     return result
-            # Fallback: custom module doesn't return feature outputs
             raise ValueError("Custom encoder module must return feature_outputs list.")
 
         for layer in self.layers:
@@ -912,24 +850,32 @@ class LuminanceEncoder(nn.Module):
 
         return self.feature_outputs
 
+    def getDownsampleChannels(self) -> List[int]:
+        return self.downsample_channels
+
+    def getNumDownsampleLayers(self) -> int:
+        return len(self.downsample_channels)
+
 
 class PixelDecoder(nn.Module):
     def __init__(self,
+                 encoder_channels: List[int],
                  embed_dim: int = 512,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
-                 dropout: float = 0.1,
-                 num_layers: int = 6,
-                 patch_size: int = 16):
+                 dropout: float = 0.1):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
-        self.num_layers = num_layers
+        self.num_layers = len(encoder_channels)
 
-        self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(
-                dim=embed_dim,
+        self.transformer_blocks = nn.ModuleList()
+        decoder_channels = list(reversed(encoder_channels))
+
+        for i in range(self.num_layers):
+            current_dim = decoder_channels[i]
+            transformer_block = TransformerBlock(
+                dim=current_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
@@ -937,100 +883,93 @@ class PixelDecoder(nn.Module):
                 use_cross_attention=False,
                 use_causal_mask=False
             )
-            for _ in range(num_layers)
-        ])
+            self.transformer_blocks.append(transformer_block)
 
-        self.upsample_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(embed_dim, embed_dim * 4, kernel_size=3, padding=1),  # [B, embed_dim*4, H, W]
-                nn.PixelShuffle(2),  # [B, embed_dim, H*2, W*2] - reduces channels by 4x, increases spatial by 2x
-                nn.GELU(),
-                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),  # [B, embed_dim, H*2, W*2]
+        self.upsample_layers = nn.ModuleList()
+        self.output_projections = nn.ModuleList()
+
+        self.feature_embeddings = nn.ModuleList()
+
+        for i in range(self.num_layers):
+            in_channels = decoder_channels[i]
+            if i < self.num_layers - 1:
+                out_channels = decoder_channels[i+1]
+            else:
+                out_channels = self.embed_dim
+
+            upsample_layer = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),  # [B, out_channels*4, H, W]
+                nn.PixelShuffle(2),  # [B, out_channels, H*2, W*2]
                 nn.GELU()
             )
-            for _ in range(num_layers)
-        ])
+            self.upsample_layers.append(upsample_layer)
 
-        self.residual_projections = nn.ModuleList()
+            feature_embed = nn.Embedding(1, out_channels)
+            nn.init.zeros_(feature_embed.weight)
+            self.feature_embeddings.append(feature_embed)
 
-        self.encoder_output_projection = None
+            if out_channels != self.embed_dim:
+                self.output_projections.append(nn.Linear(out_channels, self.embed_dim))
+            else:
+                self.output_projections.append(nn.Identity())
 
-        self.feature_embed = nn.Embedding(num_layers, embed_dim)
-
-    def forward(self,
-                encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
-
+    def forward(self, encoder_outputs: List[torch.Tensor]) -> tuple[List[torch.Tensor], torch.Tensor]:
         batch_size = encoder_outputs[0].shape[0]
         device = encoder_outputs[0].device
 
-        # Initialize encoder output projection once
-        if self.encoder_output_projection is None:
-            output_channels = encoder_outputs[-1].shape[1]
-            self.encoder_output_projection = nn.Linear(output_channels, self.embed_dim).to(device)
-
-        # Initialize residual projection layers dynamically
-        if len(self.residual_projections) == 0 and encoder_outputs:
-            for i in range(self.num_layers):
-                # For residual connections: project encoder inputs
-                residual_idx = min(i, len(encoder_outputs) - 1)
-                residual_channels = encoder_outputs[-(residual_idx + 1)].shape[1]  # Reverse order
-                self.residual_projections.append(
-                    nn.Conv2d(residual_channels, self.embed_dim, kernel_size=1).to(device)
-                )
-
         pixel_decoder_outputs = []
 
-        # Start with the encoder output as initial features
         b, c, h_enc, w_enc = encoder_outputs[-1].shape
-        encoder_patches = encoder_outputs[-1].view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, c]
-        encoder_patches = self.encoder_output_projection(encoder_patches)  # [batch_size, num_patches, embed_dim]
-
-        current_features = encoder_patches
+        current_features = encoder_outputs[-1].view(b, c, -1).transpose(1, 2)  # [batch_size, h_enc*w_enc, decoder_channels[0]]
 
         for i in range(self.num_layers):
-            # Get corresponding residual input from encoder (reverse order)
-            if encoder_outputs and i < len(encoder_outputs) and i > 0:
-                residual_idx = min(i, len(encoder_outputs) - 1)
-                residual_input = encoder_outputs[-(residual_idx + 1)]  # [batch_size, channels, H_res, W_res]
+            if i >= 1:
+                residual_input = encoder_outputs[-(i+1)]  # [batch_size, decoder_channels[i], H_res, W_res]
 
-                residual_projected = self.residual_projections[i](residual_input)  # [batch_size, embed_dim, H_res, W_res]
-                b_res, c_res, h_res, w_res = residual_projected.shape
-
-                residual_patches = residual_projected.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, num_patches, embed_dim]
+                b_res, c_res, h_res, w_res = residual_input.shape
+                residual_patches = residual_input.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, h_res*w_res, decoder_channels[i]]
 
                 transformer_input = current_features + residual_patches
-
                 h_res = residual_input.shape[2]
                 w_res = residual_input.shape[3]
             else:
                 transformer_input = current_features
-                h_res = int(current_features.shape[1] ** 0.5)
-                w_res = h_res
+                h_res = h_enc
+                w_res = w_enc
 
-            pos_encoding = distancePositionalEncoding(h_res, w_res, self.embed_dim, device)  # [1, num_patches, embed_dim]
+            pos_encoding = distancePositionalEncoding(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
             transformer_input_with_pos = transformer_input + pos_encoding
 
-            transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, num_patches, embed_dim]
+            transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
 
             b, n_patches, c = transformer_output.shape
-            h_current = int(n_patches ** 0.5)
-            w_current = h_current
-            spatial_features = transformer_output.transpose(1, 2).view(b, c, h_current, w_current)  # [batch_size, embed_dim, h, w]
+            spatial_features = transformer_output.transpose(1, 2).view(b, c, h_res, w_res)  # [batch_size, decoder_channels[i], h_res, w_res]
 
-            upsampled_features = self.upsample_layers[i](spatial_features)  # [batch_size, embed_dim, h_up, w_up]
+            upsampled_features = self.upsample_layers[i](spatial_features)  # [batch_size, out_channels, h_up, w_up]
 
-            b, c, h_up, w_up = upsampled_features.shape
-            current_features = upsampled_features.view(b, c, -1).transpose(1, 2)  # [batch_size, num_patches, embed_dim]
+            b, c_up, h_up, w_up = upsampled_features.shape
 
-            feature_embed = self.feature_embed(torch.tensor(i, device=device))
-            feature_embed = feature_embed.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, 1, embed_dim]
+            output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
 
-            if i < self.num_layers - 1:
-                pixel_decoder_outputs.append(current_features + feature_embed)
+            feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, out_channels]
+            feature_embed = feature_embed.expand(batch_size, output_features.size(1), -1)  # [batch_size, h_up*w_up, out_channels]
 
-        final_pixel_output = current_features
+            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, c_up]
 
-        return pixel_decoder_outputs, final_pixel_output
+            output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
+
+            pos_encoding = distancePositionalEncoding(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, embed_dim]
+            output_features_projected_with_pos = output_features_projected + pos_encoding  # [batch_size, h_up*w_up, embed_dim]
+            pixel_decoder_outputs.append(output_features_projected_with_pos)
+
+            current_features = output_features_with_embed  # [batch_size, h_up*w_up, c_up]
+
+        b, n_patches, c_final = current_features.shape
+        h_final = h_enc * (2 ** self.num_layers)
+        w_final = w_enc * (2 ** self.num_layers)
+        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, embed_dim, h_final, w_final]
+
+        return pixel_decoder_outputs, final_pixel_spatial
 
 
 class MultiScaleColorDecoder(nn.Module):
@@ -1050,8 +989,9 @@ class MultiScaleColorDecoder(nn.Module):
         self.color_embeddings = nn.Embedding(memory_size, embed_dim)
         nn.init.zeros_(self.color_embeddings.weight)
 
-        self.memory_embeddings = nn.Embedding(memory_size, embed_dim)  # [memory_size, embed_dim]
+        self.memory_embeddings = nn.Embedding(memory_size, embed_dim)
         nn.init.zeros_(self.memory_embeddings.weight)
+
         self.decoder_blocks = nn.ModuleList()
         for i in range(num_layers):
             decoder_block = nn.ModuleDict({
@@ -1088,7 +1028,6 @@ class MultiScaleColorDecoder(nn.Module):
 
     def forward(self, pixel_decoder_outputs: List[torch.Tensor]) -> torch.Tensor:
         batch_size = pixel_decoder_outputs[0].shape[0]
-        device = pixel_decoder_outputs[0].device
 
         color_queries = self.color_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
 
@@ -1100,17 +1039,12 @@ class MultiScaleColorDecoder(nn.Module):
             pixel_features_idx = i % len(pixel_decoder_outputs)
             pixel_features = pixel_decoder_outputs[pixel_features_idx]  # [batch_size, num_patches, embed_dim]
 
-            num_patches = pixel_features.shape[1]
-            pos_encoding_keys = distancePositionalEncoding(1, num_patches, self.embed_dim, device)  # [1, num_patches, embed_dim]
-
             queries_with_pos = color_decoder_output + memory  # [batch_size, memory_size, embed_dim]
-            keys_with_pos = pixel_features + pos_encoding_keys  # [batch_size, num_patches, embed_dim]
-            values = pixel_features  # [batch_size, num_patches, embed_dim]
 
             cross_attn_out = block['cross_attention'](
                 query=queries_with_pos,
-                key=keys_with_pos,
-                value=values
+                key=pixel_features,
+                value=pixel_features
             )  # [batch_size, memory_size, embed_dim]
 
             color_decoder_output = color_decoder_output + cross_attn_out
@@ -1133,9 +1067,7 @@ class ColorMemoryTransformer(nn.Module):
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
-                 pixel_decoder_layers: int = 6,
                  color_decoder_layers: int = 6,
-                 patch_size: int = 16,
                  memory_size: int = 256,
                  smoothing_config_path: str = None,
                  encoder_module: Optional[nn.Module] = None,
@@ -1143,20 +1075,22 @@ class ColorMemoryTransformer(nn.Module):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.patch_size = patch_size
         self.memory_size = memory_size
-        self.pixel_decoder_layers = pixel_decoder_layers
         self.color_decoder_layers = color_decoder_layers
 
         self.luminance_encoder = LuminanceEncoder(encoder_module, encoder_config_path)
+        encoder_channels = self.luminance_encoder.getDownsampleChannels()
+
         self.pixel_decoder = PixelDecoder(
+            encoder_channels=encoder_channels,
             embed_dim=embed_dim,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
-            dropout=dropout,
-            num_layers=pixel_decoder_layers,
-            patch_size=patch_size
+            dropout=dropout
         )
+
+        self.pixel_decoder_layers = self.pixel_decoder.num_layers
+
         self.color_decoder = MultiScaleColorDecoder(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -1166,16 +1100,9 @@ class ColorMemoryTransformer(nn.Module):
             memory_size=memory_size
         )
 
-        self.pixel_upsample = PatchUpsample(
-            patch_size=patch_size,
-            embed_dim=embed_dim,
-            out_channels=embed_dim,
-            upsample=False
-        )
+        self.smoothing_layers = self.loadSmoothingNetwork(smoothing_config_path)
 
-        self.smoothing_layers = self._loadSmoothingNetwork(smoothing_config_path)
-
-    def _loadSmoothingNetwork(self, config_path: str) -> nn.Module:
+    def loadSmoothingNetwork(self, config_path: str) -> nn.Module:
         if config_path is None:
             default_config = [
                 {"type": "Conv2d", "params": {"in_channels": self.memory_size, "out_channels": 64, "kernel_size": 3, "padding": 1}},
@@ -1198,9 +1125,6 @@ class ColorMemoryTransformer(nn.Module):
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         batch_size, channels, h, w = img.shape
 
-        if h % self.patch_size != 0 or w % self.patch_size != 0:
-            raise ValueError("Image size must be divisible by patch_size")
-
         if channels == 3:
             luminance = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
         elif channels == 1:
@@ -1210,17 +1134,12 @@ class ColorMemoryTransformer(nn.Module):
 
         encoder_outputs = self.luminance_encoder(luminance)
 
-        pixel_decoder_outputs, final_pixel_output = self.pixel_decoder(
-            encoder_outputs
-        )
+        pixel_decoder_outputs, final_pixel_output = self.pixel_decoder(encoder_outputs)  # final_pixel_output: [batch_size, embed_dim, H, W]
 
         color_decoder_output = self.color_decoder(pixel_decoder_outputs)  # [batch_size, memory_size, embed_dim]
 
-        pixel_features = self.pixel_upsample(final_pixel_output)  # [batch_size, embed_dim, h, w]
-
-        output = torch.einsum("bqc,bchw->bqhw", color_decoder_output, pixel_features)  # [batch_size, memory_size, h, w]
-
-        output = self.smoothing_layers(output)  # [batch_size, 1, h, w]
+        output = torch.einsum("bqc,bchw->bqhw", color_decoder_output, final_pixel_output)  # [batch_size, memory_size, H, W]
+        output = self.smoothing_layers(output)  # [batch_size, 1, H, W]
 
         return output
 
@@ -1349,108 +1268,116 @@ class ConvAttenColorizationNetwork(nn.Module):
 
 
 class UNetEncoderBlock(nn.Module):
-    """UNet encoder block with optional downsampling"""
-
     def __init__(self, in_channels: int, out_channels: int, downsample: bool = True, block_name: str = ""):
         super().__init__()
         self._block_name = block_name
+        self.downsample = downsample
 
-        layers = []
-        layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
-        layers.append(nn.InstanceNorm2d(out_channels))
-        layers.append(nn.GELU())
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.activation = nn.GELU()
 
-        layers.append(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1))
-        layers.append(nn.InstanceNorm2d(out_channels))
-        layers.append(nn.GELU())
-
-        self._conv_block = nn.Sequential(*layers)
+        self.residual_conv = None
+        if in_channels != out_channels:
+            self.residual_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
         if downsample:
-            self._downsample = nn.Sequential(
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1),
-                nn.InstanceNorm2d(out_channels),
-                nn.GELU()
-            )
+            self.downsample_conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1)
         else:
-            self._downsample = None
+            self.downsample_conv = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self._conv_block(x)
+        residual = x
 
-        self._skip_features = features
+        x = self.conv1(x)
+        x = self.activation(x)
+        x = self.conv2(x)
 
-        if self._downsample is not None:
-            return self._downsample(features)
-        return features
+        if self.residual_conv is not None:
+            residual = self.residual_conv(residual)
+        if residual.shape == x.shape:
+            x = x + residual
+
+        x = self.activation(x)
+        self._skip_features = x
+
+        if self.downsample and self.downsample_conv is not None:
+            return self.downsample_conv(x)
+        return x
 
 
 class UNetDecoderBlock(nn.Module):
-    """UNet decoder block with summed skip connections"""
-
     def __init__(self, in_channels: int, out_channels: int, upsample: bool = True,
                  skip_connection: str = "", block_name: str = ""):
         super().__init__()
         self._skip_connection_name = skip_connection
         self._block_name = block_name
+        self.upsample = upsample
 
         if upsample:
-            self._upsample = nn.Sequential(
-                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
-                nn.InstanceNorm2d(out_channels),
-                nn.GELU()
-            )
-            conv_input_channels = out_channels
+            self.upsample_conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
         else:
-            self._upsample = None
-            conv_input_channels = in_channels
+            self.upsample_conv = None
 
-        self._conv_block = nn.Sequential(
-            nn.Conv2d(conv_input_channels, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(out_channels),
-            nn.GELU(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(out_channels),
-            nn.GELU()
-        )
+        self.conv1 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.activation = nn.GELU()
 
     def forward(self, x: torch.Tensor, encoder_features: Dict[str, torch.Tensor]) -> torch.Tensor:
-        if self._upsample is not None:
-            x = self._upsample(x)
+        if self.upsample and self.upsample_conv is not None:
+            x = self.upsample_conv(x)
+            x = self.activation(x)
 
         if self._skip_connection_name and self._skip_connection_name in encoder_features:
             skip_features = encoder_features[self._skip_connection_name]
-
             if skip_features.shape[-2:] != x.shape[-2:]:
-                skip_features = F.interpolate(
-                    skip_features, size=x.shape[-2:], mode='bicubic', align_corners=False
-                )
+                raise ValueError(f"Skip connection dimension mismatch: {skip_features.shape} vs {x.shape}")
             x = x + skip_features
 
-        return self._conv_block(x)
+        x = self.conv1(x)
+        x = self.activation(x)
+        x = self.conv2(x)
+        x = self.activation(x)
+
+        return x
 
 
 class UNetBottleneck(nn.Module):
-    """Bottleneck layer at the bottom of UNet"""
-
     def __init__(self, channels: int, bottleneck_channels: int = 512):
         super().__init__()
-        self.bottleneck = nn.Sequential(
-            nn.Conv2d(channels, bottleneck_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(bottleneck_channels),
-            nn.GELU(),
-            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(bottleneck_channels),
-            nn.GELU()
-        )
+        self.conv1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(bottleneck_channels, channels, kernel_size=3, padding=1)
+        self.activation = nn.GELU()
+
+        self.residual1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=1) if channels != bottleneck_channels else None
+        self.residual2 = nn.Conv2d(bottleneck_channels, channels, kernel_size=1) if bottleneck_channels != channels else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.bottleneck(x)
+        residual1 = x
+        x = self.conv1(x)
+        x = self.activation(x)
+
+        if self.residual1 is not None:
+            residual1 = self.residual1(residual1)
+        if residual1.shape == x.shape:
+            x = x + residual1
+
+        x = self.conv2(x)
+        x = self.activation(x)
+
+        residual2 = x
+        x = self.conv3(x)
+
+        if self.residual2 is not None:
+            residual2 = self.residual2(residual2)
+        if residual2.shape == x.shape:
+            x = x + residual2
+
+        return self.activation(x)
 
 
 class UNetWithSkipConnections(nn.Module):
-    """Complete UNet with summed skip connections"""
-
     def __init__(self, layers_config: List[Dict[str, Any]]):
         super().__init__()
         self.encoder_blocks = nn.ModuleDict()
