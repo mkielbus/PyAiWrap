@@ -2,47 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-import json
-from typing import Dict, Any
-
-
-def loadHyperparameters(json_path: str) -> Dict[str, Any]:
-    """
-    Load hyperparameters from a JSON file.
-
-    Args:
-        json_path (str): Path to the JSON file containing hyperparameters.
-
-    Returns:
-        Dict[str, Any]: A dictionary with hyperparameters and their values.
-    """
-    with open(json_path, "r") as f:
-        hyperparams = json.load(f)
-
-    defaults = {
-        "BATCH_SIZE": 1,
-        "TRAIN_DATA_PATH": "./data/DIV2K_train_LR_bicubic/X4",
-        "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
-        "ARCHITECTURE_ID": "0",
-        "HYPERPARAMS_ID": "0",
-        "LEARNING_RATE": 0.0001,
-        "GAMMA": 0.99,
-        "IMAGE_RESIZE": 64,
-        "IMAGE_CHANNELS": 3,
-        "WARMUP_EPOCHS": 2,
-        "EPOCHS": 100,
-        "DIAGRAMS_DATA_PATH": "./diagrams_data",
-        "WEIGHTS_PATH": "./weights",
-        "PATIENCE": 15,
-        "DIAGRAMS_PATH": "./diagrams",
-        "VISUALIZE_EVERY": 10,
-        "GRADIENT_CLIP": 1.0
-    }
-
-    for key, default_value in defaults.items():
-        hyperparams.setdefault(key, default_value)
-
-    return hyperparams
 
 
 def warmupGAN(
@@ -67,9 +26,7 @@ def warmupGAN(
     generator.train()
     discriminator.train()
 
-    # -------------------------
     # Generator Autoencoder Warmup
-    # -------------------------
     for epoch in range(warmup_epochs):
         generator_losses = []
         generator_warmup_iterator = tqdm(warmup_loader, desc=f"Generator warmup epoch: {epoch+1}/{warmup_epochs}",
@@ -93,9 +50,7 @@ def warmupGAN(
     for param in generator.parameters():
         param.requires_grad = False
 
-    # -------------------------
     # Train Discriminator
-    # -------------------------
     for epoch in range(warmup_epochs):
         discriminator_losses = []
         discriminator_warmup_iterator = tqdm(warmup_loader, desc=f"Discriminator warmup epoch: {epoch+1}/{warmup_epochs}",
@@ -132,4 +87,4 @@ def warmupGAN(
     for param in generator.parameters():
         param.requires_grad = True
 
-    print("Warmup phase completed ✅")
+    print("Warmup phase completed")

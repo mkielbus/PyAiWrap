@@ -65,7 +65,11 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         "COLORFULNESS_WEIGHT": 0.0,
         "COLORFULNESS_TARGET": None,
         "TARGET_CHANNEL": "RGB",
-        "TARGET_OUTPUT_CHANNELS": 3
+        "TARGET_OUTPUT_CHANNELS": 3,
+
+        "WARMUP_EPOCHS": 2,
+        "KL_BETA": 0.01,  # KL divergence weight for VAE,
+        "LATENT_DIM": 1024
     }
 
     for key, default_value in defaults.items():

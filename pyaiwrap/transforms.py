@@ -448,3 +448,79 @@ def labToRgbForVisualization(labTensor):
         rgb = rgb.squeeze(0)
 
     return rgb
+
+
+def channelTransform(channel_type: str, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+    """
+    Get the appropriate transform for input or target channels.
+
+    Args:
+        channel_type: Channel type ("luminance", "R", "G", "B", or "RGB")
+        image_size: Size to resize images to
+        output_channels: Number of output channels (1 or 3)
+        is_input: Whether this is for input (True) or target (False)
+
+    Returns:
+        Transform composition
+
+    Raises:
+        ValueError: If channel_type is invalid
+    """
+    if channel_type == "RGB":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+    elif channel_type == "LAB":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            RGBToLAB()
+        ])
+    elif channel_type == "AB":
+        if output_channels not in [2, 3]:
+            raise ValueError("output_channels must be 2 or 3 for 'ab' channel_type")
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            RGBToLAB(),
+            ExtractABChannels(num_output_channels=output_channels)
+        ])
+    elif channel_type == "ab_to_3ch":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            RGBToLAB(),
+            ExtractABChannelsTo3Channel()
+        ])
+    elif channel_type == "luminance":
+        if not is_input:
+            raise ValueError("luminance can only be used for input channels, not target channels")
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            ToGrayscale(num_output_channels=output_channels),
+            transforms.ToTensor()
+        ])
+
+    elif channel_type == "R":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            ExtractRedChannel(num_output_channels=output_channels)
+        ])
+
+    elif channel_type == "G":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            ExtractGreenChannel(num_output_channels=output_channels)
+        ])
+
+    elif channel_type == "B":
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            ExtractBlueChannel(num_output_channels=output_channels)
+        ])
+
+    else:
+        raise ValueError(f"channel_type must be 'luminance', 'R', 'G', 'B', or 'RGB', got '{channel_type}'")
+
+    return transform
