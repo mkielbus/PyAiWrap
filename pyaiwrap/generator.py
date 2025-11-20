@@ -89,7 +89,6 @@ class GeneratorCreator:
             factory = StandaloneGeneratorFactory()
 
         generator = factory.createGenerator(architecture_id, submodules, device, hyperparams)
-        print(factory.getDescription())
 
         return generator
 
