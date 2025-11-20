@@ -1,6 +1,8 @@
 from typing import Any, Dict, List
 import json
 from .neural_network import NeuralNetwork
+from abc import ABC, abstractmethod
+from enum import Enum
 
 
 def loadLayersFromJson(file_path: str) -> List[Dict[str, Any]]:
@@ -15,3 +17,489 @@ def loadLayersFromJson(file_path: str) -> List[Dict[str, Any]]:
 def buildNeuralNetworkFromJson(file_path: str) -> NeuralNetwork:
     layers = loadLayersFromJson(file_path)
     return NeuralNetwork(layers)
+
+
+class ConfigCategory(Enum):
+    """Enum representing different configuration categories."""
+    DATA = "data"
+    TRAINING = "training"
+    SCHEDULER = "scheduler"
+    LOSS = "loss"
+    MODEL = "model"
+    OUTPUT = "output"
+
+
+class SchedulerType(Enum):
+    """Enum representing different scheduler types."""
+    EXPONENTIAL = "exponential"
+    COSINE_WARM_RESTARTS = "cosine_warm_restarts"
+    ONECYCLE = "onecycle"
+    COSINE = "cosine"
+    STEP = "step"
+
+
+class LossType(Enum):
+    """Enum representing different loss types."""
+    BASIC = "basic"
+    PERCEPTUAL = "perceptual"
+    COLORFULNESS = "colorfulness"
+    VAE = "vae"
+
+
+class ModelType(Enum):
+    """Enum representing different model types."""
+    STANDARD = "standard"
+    SUBMODULAR = "submodular"
+    VAE = "vae"
+
+
+class OptimizerType(Enum):
+    """Enum representing different optimizer types."""
+    ADAM = "adam"
+    ADAMW = "adamw"
+
+
+class TrainingType(Enum):
+    """Enum representing different training types."""
+    STANDARD = "standard"
+    GAN = "gan"
+
+
+class ConfigBuilder(ABC):
+    """Abstract base class for configuration builders."""
+
+    @abstractmethod
+    def getDefaults(self) -> Dict[str, Any]:
+        """Get default values for this configuration category."""
+        pass
+
+    @abstractmethod
+    def getCategory(self) -> ConfigCategory:
+        """Get the category this builder handles."""
+        pass
+
+    def build(self, user_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Build configuration with user params and defaults."""
+        defaults = self.getDefaults()
+        config = {}
+
+        for key, default_value in defaults.items():
+            config[key] = user_params.get(key, default_value)
+
+        return config
+
+
+class DataConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "BATCH_SIZE": 1,
+            "TRAIN_DATA_PATH": "./data/DIV2K_train_LR_bicubic/X4",
+            "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
+            "IMAGE_RESIZE": 256,
+            "INPUT_CHANNEL": "RGB",
+            "OUTPUT_CHANNELS": 3,
+            "TARGET_CHANNEL": "RGB",
+            "TARGET_OUTPUT_CHANNELS": 3
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.DATA
+
+
+class TrainingConfigBuilderFactory:
+    """Factory for creating training-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(training_type: TrainingType) -> ConfigBuilder:
+        """Create appropriate training builder based on type."""
+        builder_mapping = {
+            TrainingType.STANDARD: StandardTrainingConfigBuilder(),
+            TrainingType.GAN: GANTrainingConfigBuilder()
+        }
+
+        return builder_mapping.get(training_type, StandardTrainingConfigBuilder())
+
+
+class StandardTrainingConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "TRAINING_TYPE": "standard",
+            "EPOCHS": 300,
+            "LEARNING_RATE": 0.0001,
+            "PATIENCE": 30,
+            "GRADIENT_CLIP": 1.0
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.TRAINING
+
+
+class GANTrainingConfigBuilder(StandardTrainingConfigBuilder):
+    """GAN training builder that extends standard training with GAN-specific parameters."""
+
+    def getDefaults(self) -> Dict[str, Any]:
+        parent_defaults = super().getDefaults()
+        parent_defaults.update({
+            "TRAINING_TYPE": "gan",
+            "WARMUP_EPOCHS": 15
+        })
+        return parent_defaults
+
+
+class OptimizerConfigBuilderFactory:
+    """Factory for creating optimizer-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(optimizer_type: OptimizerType) -> ConfigBuilder:
+        """Create appropriate optimizer builder based on type."""
+        builder_mapping = {
+            OptimizerType.ADAM: AdamOptimizerConfigBuilder(),
+            OptimizerType.ADAMW: AdamWOptimizerConfigBuilder()
+        }
+
+        return builder_mapping.get(optimizer_type, AdamOptimizerConfigBuilder())
+
+
+class AdamOptimizerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "OPTIMIZER_TYPE": "adam",
+            "B1": 0.9,
+            "B2": 0.999
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.TRAINING
+
+
+class AdamWOptimizerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "OPTIMIZER_TYPE": "adamw",
+            "WEIGHT_DECAY": 0.01,
+            "B1": 0.9,
+            "B2": 0.999
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.TRAINING
+
+
+class SchedulerConfigBuilderFactory:
+    """Factory for creating scheduler-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(scheduler_type: SchedulerType) -> ConfigBuilder:
+        """Create appropriate scheduler builder based on type."""
+        builder_mapping = {
+            SchedulerType.EXPONENTIAL: ExponentialSchedulerConfigBuilder(),
+            SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsConfigBuilder(),
+            SchedulerType.ONECYCLE: OneCycleSchedulerConfigBuilder(),
+            SchedulerType.COSINE: CosineSchedulerConfigBuilder(),
+            SchedulerType.STEP: StepSchedulerConfigBuilder()
+        }
+
+        return builder_mapping.get(scheduler_type, ExponentialSchedulerConfigBuilder())
+
+
+class ExponentialSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "exponential",
+            "GAMMA": 0.99,
+            "MIN_LR": 1e-6
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class CosineWarmRestartsConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "cosine_warm_restarts",
+            "T_0": 30,
+            "T_MULT": 2,
+            "MIN_LR": 1e-6
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class OneCycleSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "onecycle",
+            "MAX_LR_MULTIPLIER": 10,
+            "PCT_START": 0.1,
+            "DIV_FACTOR": 10,
+            "FINAL_DIV_FACTOR": 100
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class CosineSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "cosine",
+            "MIN_LR": 1e-6
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class StepSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "step",
+            "STEP_SIZE": 30,
+            "STEP_GAMMA": 0.1
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class LossConfigBuilderFactory:
+    """Factory for creating loss-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(loss_type: LossType) -> ConfigBuilder:
+        """Create appropriate loss builder based on type."""
+        builder_mapping = {
+            LossType.BASIC: BasicLossConfigBuilder(),
+            LossType.PERCEPTUAL: PerceptualLossConfigBuilder(),
+            LossType.COLORFULNESS: ColorfulnessLossConfigBuilder(),
+            LossType.VAE: VAELossConfigBuilder()
+        }
+
+        return builder_mapping.get(loss_type, BasicLossConfigBuilder())
+
+
+class BasicLossConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "RECON_WEIGHT": 1.0
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.LOSS
+
+
+class PerceptualLossConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "PERCEPTUAL_WEIGHT": 0.1,
+            "USE_LPIPS": True,
+            "LPIPS_NET": "alex"
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.LOSS
+
+
+class ColorfulnessLossConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "COLORFULNESS_WEIGHT": 0.01,
+            "COLORFULNESS_TARGET": None
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.LOSS
+
+
+class VAELossConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "KL_BETA": 0.01,
+            "LATENT_DIM": 1024
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.LOSS
+
+
+class ModelConfigBuilderFactory:
+    """Factory for creating model-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(model_type: ModelType) -> ConfigBuilder:
+        """Create appropriate model builder based on type."""
+        builder_mapping = {
+            ModelType.STANDARD: StandardModelConfigBuilder(),
+            ModelType.SUBMODULAR: SubmodularModelConfigBuilder(),
+            ModelType.VAE: VAEModelConfigBuilder()
+        }
+
+        return builder_mapping.get(model_type, StandardModelConfigBuilder())
+
+
+class StandardModelConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "HYPERPARAMS_ID": "0",
+            "ARCHITECTURE_ID": "0",
+            "ARCHITECTURE_PATH": "./network_architectures/generators/",
+            "SUBMODULES": {}
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.MODEL
+
+
+class SubmodularModelConfigBuilder(StandardModelConfigBuilder):
+    """Submodular model builder that extends standard model with modular class."""
+
+    def getDefaults(self) -> Dict[str, Any]:
+        parent_defaults = super().getDefaults()
+        parent_defaults.update({
+            "MODULAR_CLASS": "ConvAttenColorizationNetwork"
+        })
+        return parent_defaults
+
+
+class VAEModelConfigBuilder(StandardModelConfigBuilder):
+    """VAE model builder that extends standard model with VAE-specific parameters."""
+
+    def getDefaults(self) -> Dict[str, Any]:
+        parent_defaults = super().getDefaults()
+        parent_defaults.update({
+            "LATENT_DIM": 1024
+        })
+        return parent_defaults
+
+
+class OutputConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "DIAGRAMS_DATA_PATH": "./diagrams_data",
+            "WEIGHTS_PATH": "./weights",
+            "DIAGRAMS_PATH": "./diagrams",
+            "VISUALIZE_EVERY": 5
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.OUTPUT
+
+
+class HyperparametersDirector:
+    """Director class that orchestrates the configuration building process."""
+
+    def __init__(self):
+        self._base_builders: Dict[ConfigCategory, ConfigBuilder] = {
+            ConfigCategory.DATA: DataConfigBuilder(),
+            ConfigCategory.OUTPUT: OutputConfigBuilder()
+        }
+
+    def loadHyperparameters(self, json_path: str) -> Dict[str, Any]:
+        """
+        Load hyperparameters from a JSON file with categorized defaults.
+
+        Args:
+            json_path (str): Path to the JSON file containing hyperparameters.
+
+        Returns:
+            Dict[str, Any]: A dictionary with hyperparameters and their values.
+        """
+        with open(json_path, "r") as f:
+            user_params = json.load(f)
+
+        final_config = {}
+
+        for builder in self._base_builders.values():
+            category_config = builder.build(user_params)
+            final_config.update(category_config)
+
+        training_type_str = user_params.get("TRAINING_TYPE", "standard")
+        try:
+            training_type = TrainingType(training_type_str)
+            training_builder = TrainingConfigBuilderFactory.createBuilder(training_type)
+            training_config = training_builder.build(user_params)
+            final_config.update(training_config)
+        except ValueError:
+            default_training_builder = TrainingConfigBuilderFactory.createBuilder(TrainingType.STANDARD)
+            training_config = default_training_builder.build(user_params)
+            final_config.update(training_config)
+
+        optimizer_type_str = user_params.get("OPTIMIZER_TYPE", "adamw")
+        try:
+            optimizer_type = OptimizerType(optimizer_type_str)
+            optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(optimizer_type)
+            optimizer_config = optimizer_builder.build(user_params)
+            final_config.update(optimizer_config)
+        except ValueError:
+            default_optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(OptimizerType.ADAMW)
+            optimizer_config = default_optimizer_builder.build(user_params)
+            final_config.update(optimizer_config)
+
+        scheduler_type_str = user_params.get("SCHEDULER_TYPE", "exponential")
+        try:
+            scheduler_type = SchedulerType(scheduler_type_str)
+            scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(scheduler_type)
+            scheduler_config = scheduler_builder.build(user_params)
+            final_config.update(scheduler_config)
+        except ValueError:
+            default_scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(SchedulerType.EXPONENTIAL)
+            scheduler_config = default_scheduler_builder.build(user_params)
+            final_config.update(scheduler_config)
+
+        loss_types = self._getEnabledLossTypes(user_params)
+        for loss_type in loss_types:
+            loss_builder = LossConfigBuilderFactory.createBuilder(loss_type)
+            loss_config = loss_builder.build(user_params)
+            final_config.update(loss_config)
+
+        model_type = self._getModelType(user_params)
+        model_builder = ModelConfigBuilderFactory.createBuilder(model_type)
+        model_config = model_builder.build(user_params)
+        final_config.update(model_config)
+
+        return final_config
+
+    def _getEnabledLossTypes(self, user_params: Dict[str, Any]) -> list[LossType]:
+        """Determine which loss types are enabled based on user parameters."""
+        enabled_loss_types = []
+
+        enabled_loss_types.append(LossType.BASIC)
+
+        if user_params.get("USE_LPIPS", False) or user_params.get("PERCEPTUAL_WEIGHT", 0.0) > 0:
+            enabled_loss_types.append(LossType.PERCEPTUAL)
+
+        if user_params.get("COLORFULNESS_WEIGHT", 0.0) > 0:
+            enabled_loss_types.append(LossType.COLORFULNESS)
+
+        if user_params.get("KL_BETA", 0.0) > 0:
+            enabled_loss_types.append(LossType.VAE)
+
+        return enabled_loss_types
+
+    def _getModelType(self, user_params: Dict[str, Any]) -> ModelType:
+        """Determine model type based on user parameters."""
+        submodules = user_params.get("SUBMODULES", {})
+        kl_beta = user_params.get("KL_BETA", 0.0)
+
+        if kl_beta > 0:
+            return ModelType.VAE
+        elif submodules:
+            return ModelType.SUBMODULAR
+        else:
+            return ModelType.STANDARD
+
+
+def loadHyperparameters(json_path: str) -> Dict[str, Any]:
+    """
+    Load hyperparameters from a JSON file with enhanced defaults.
+
+    Args:
+        json_path (str): Path to the JSON file containing hyperparameters.
+
+    Returns:
+        Dict[str, Any]: A dictionary with hyperparameters and their values.
+    """
+    hyperparams_director = HyperparametersDirector()
+    return hyperparams_director.loadHyperparameters(json_path)

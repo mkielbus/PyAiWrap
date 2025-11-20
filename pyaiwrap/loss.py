@@ -546,8 +546,8 @@ class GeneratorColorizationLoss:
     def calculatePerceptualLoss(self, reconstructed, original, modified):
         """Calculate perceptual loss, converting to RGB if needed"""
         # Convert to RGB for perceptual loss calculation
-        recon_rgb = self._convert_to_rgb_for_loss(reconstructed, modified)
-        original_rgb = self._convert_to_rgb_for_loss(original, modified)
+        recon_rgb = self._convertToRgbForLoss(reconstructed, modified)
+        original_rgb = self._convertToRgbForLoss(original, modified)
 
         # LPIPS expects images in range [-1, 1]
         recon_normalized = recon_rgb * 2.0 - 1.0
@@ -563,9 +563,8 @@ class GeneratorColorizationLoss:
         colorfulnessOriginal = torch.tensor(0.0, device=reconstructed.device)
 
         if self.colorfulness_weight > 0:
-            # Convert to RGB for colorfulness calculation
-            recon_rgb = self._convert_to_rgb_for_loss(reconstructed, modified)
-            original_rgb = self._convert_to_rgb_for_loss(original, modified)
+            recon_rgb = self._convertToRgbForLoss(reconstructed, modified)
+            original_rgb = self._convertToRgbForLoss(original, modified)
 
             colorfulnessRecon = calculateColorfulnessLoss(recon_rgb)
             colorfulnessOriginal = calculateColorfulnessLoss(original_rgb)
@@ -578,7 +577,7 @@ class GeneratorColorizationLoss:
 
         return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
 
-    def _convert_to_rgb_for_loss(self, images, modified):
+    def _convertToRgbForLoss(self, images, modified):
         """Convert images to RGB for perceptual/colorfulness losses"""
         if self.target_channel == "RGB":
             return images

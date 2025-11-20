@@ -5,6 +5,8 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 from abc import ABC, abstractmethod
+from typing import Dict
+from enum import Enum
 
 
 class ImageTransform(ABC):
@@ -450,77 +452,120 @@ def labToRgbForVisualization(labTensor):
     return rgb
 
 
-def channelTransform(channel_type: str, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
-    """
-    Get the appropriate transform for input or target channels.
+class ChannelType(Enum):
+    """Enum representing different channel types."""
+    RGB = "RGB"
+    LAB = "LAB"
+    AB = "AB"
+    AB_TO_3CH = "ab_to_3ch"
+    LUMINANCE = "luminance"
+    R = "R"
+    G = "G"
+    B = "B"
 
-    Args:
-        channel_type: Channel type ("luminance", "R", "G", "B", or "RGB")
-        image_size: Size to resize images to
-        output_channels: Number of output channels (1 or 3)
-        is_input: Whether this is for input (True) or target (False)
 
-    Returns:
-        Transform composition
+class TransformFactory(ABC):
+    """Abstract factory interface for creating transform compositions."""
 
-    Raises:
-        ValueError: If channel_type is invalid
-    """
-    if channel_type == "RGB":
-        transform = transforms.Compose([
+    @abstractmethod
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        pass
+
+
+class RGBTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor()
         ])
-    elif channel_type == "LAB":
-        transform = transforms.Compose([
+
+
+class LABTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             RGBToLAB()
         ])
-    elif channel_type == "AB":
+
+
+class ABTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         if output_channels not in [2, 3]:
             raise ValueError("output_channels must be 2 or 3 for 'ab' channel_type")
-        transform = transforms.Compose([
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             RGBToLAB(),
             ExtractABChannels(num_output_channels=output_channels)
         ])
-    elif channel_type == "ab_to_3ch":
-        transform = transforms.Compose([
+
+
+class ABTo3ChannelTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             RGBToLAB(),
             ExtractABChannelsTo3Channel()
         ])
-    elif channel_type == "luminance":
+
+
+class LuminanceTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         if not is_input:
             raise ValueError("luminance can only be used for input channels, not target channels")
-        transform = transforms.Compose([
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             ToGrayscale(num_output_channels=output_channels),
             transforms.ToTensor()
         ])
 
-    elif channel_type == "R":
-        transform = transforms.Compose([
+
+class RedChannelTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             ExtractRedChannel(num_output_channels=output_channels)
         ])
 
-    elif channel_type == "G":
-        transform = transforms.Compose([
+
+class GreenChannelTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             ExtractGreenChannel(num_output_channels=output_channels)
         ])
 
-    elif channel_type == "B":
-        transform = transforms.Compose([
+
+class BlueChannelTransformFactory(TransformFactory):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             ExtractBlueChannel(num_output_channels=output_channels)
         ])
 
-    else:
-        raise ValueError(f"channel_type must be 'luminance', 'R', 'G', 'B', or 'RGB', got '{channel_type}'")
 
-    return transform
+class ChannelTransformCreator:
+    """Main creator class that uses the abstract factory pattern."""
+
+    _factories: Dict[ChannelType, TransformFactory] = {
+        ChannelType.RGB: RGBTransformFactory(),
+        ChannelType.LAB: LABTransformFactory(),
+        ChannelType.AB: ABTransformFactory(),
+        ChannelType.AB_TO_3CH: ABTo3ChannelTransformFactory(),
+        ChannelType.LUMINANCE: LuminanceTransformFactory(),
+        ChannelType.R: RedChannelTransformFactory(),
+        ChannelType.G: GreenChannelTransformFactory(),
+        ChannelType.B: BlueChannelTransformFactory()
+    }
+
+    @classmethod
+    def getTransform(cls, channel_type: str, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        """Get the appropriate transform for the given channel type."""
+        try:
+            channel_enum = ChannelType(channel_type)
+            factory = cls._factories[channel_enum]
+            return factory.createTransform(image_size, output_channels, is_input)
+        except (KeyError, ValueError):
+            raise ValueError(f"channel_type must be 'luminance', 'R', 'G', 'B', or 'RGB', got '{channel_type}'")

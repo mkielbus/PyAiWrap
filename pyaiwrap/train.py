@@ -21,7 +21,7 @@ def train(
     weights_path: str = "./weights",
     diagrams_path: str = "./diagrams",
     launch_number: int = 0,
-    visualize_every_xth_epoch: int = 5,
+    visualize_every_xth_epoch: int | None = 5,
     max_patience: int = 15,
     model_type: str = "generator",
     gradient_clip: Optional[float] = 1.0,
@@ -162,7 +162,7 @@ def train(
 
         metrics.display(epoch=epoch + 1)
 
-        if control_fn is not None and (epoch + 1) % visualize_every_xth_epoch == 0:
+        if control_fn is not None and visualize_every_xth_epoch and (epoch + 1) % visualize_every_xth_epoch == 0:
             with torch.no_grad():
                 control_fn(
                     models=models,
