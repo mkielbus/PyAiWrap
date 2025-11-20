@@ -61,7 +61,7 @@ class OptimizerCreator:
 
     @classmethod
     def createOptimizer(cls, optimizer_type: OptimizerType, parameters,
-                        hyperparams: Dict[str, Any]) -> Dict[str, torch.optim.Optimizer]:
+                        hyperparams: Dict[str, Any]) -> torch.optim.Optimizer:
         """Create optimizer and return as dictionary."""
         try:
             factory = cls._factories[optimizer_type]
@@ -69,9 +69,8 @@ class OptimizerCreator:
             factory = AdamOptimizerFactory()
 
         optimizer = factory.createOptimizer(parameters, hyperparams)
-        print(factory.getDescription(hyperparams))
 
-        return {'generator': optimizer}
+        return optimizer
 
 
 def createOptimizer(model_parameters: Iterator[Parameter],
