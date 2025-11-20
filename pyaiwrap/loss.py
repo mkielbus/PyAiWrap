@@ -465,12 +465,10 @@ class GeneratorColorizationLoss:
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
-            print(f"Initializing LPIPS with {lpips_net} network...")
             self.perceptual_loss_fn = lpips.LPIPS(net=lpips_net).to(device)
             self.perceptual_loss_fn.eval()
             for param in self.perceptual_loss_fn.parameters():
                 param.requires_grad = False
-            print("LPIPS initialized successfully")
 
     def __call__(
         self,
