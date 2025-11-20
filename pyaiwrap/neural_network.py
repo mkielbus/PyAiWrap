@@ -633,7 +633,6 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
         patch_h = h // patch_size
         patch_w = w // patch_size
-
         grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
         encoder_input = grayscale_patches + grayscale_pos_encoding
 
@@ -660,7 +659,6 @@ class ColorizationTransformerNet(nn.Module):
             output = self.color_upsample(output_embeddings)  # [B, output_channels, H, W]
 
         return output
-
 
 class NeuralNetworkLayer(nn.Module):
     """
