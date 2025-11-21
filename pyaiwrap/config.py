@@ -592,8 +592,8 @@ class ConfigDirector:
         self._buildLossConfig(user_params, final_config)
         self._buildModelConfig(user_params, final_config)
 
-        passed_keys = set("SCHEDULER_TYPE", "OPTIMIZER_TYPE", "TRAINING_TYPE", "DATA_TYPE", "OUTPUT_TYPE",
-                          "LOSS_TYPES", "MODEL_TYPE")
+        passed_keys = set(["SCHEDULER_TYPE", "OPTIMIZER_TYPE", "TRAINING_TYPE", "DATA_TYPE", "OUTPUT_TYPE",
+                          "LOSS_TYPES", "MODEL_TYPE"])
         excessive_keys = set(user_params.keys()) - passed_keys - set(final_config.toDict().keys())
         if excessive_keys:
             raise InvalidFieldsError(", ".join(excessive_keys))
