@@ -316,7 +316,6 @@ class StandardTrainingConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "EPOCHS": 300,
-            "LEARNING_RATE": 0.0001,
             "PATIENCE": 30,
             "GRADIENT_CLIP": 1.0
         }
@@ -353,7 +352,7 @@ class OptimizerConfigBuilderFactory:
 class AdamOptimizerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "OPTIMIZER_TYPE": "adam",
+            "LEARNING_RATE": 0.0001,
             "B1": 0.9,
             "B2": 0.999
         }
@@ -365,7 +364,7 @@ class AdamOptimizerConfigBuilder(ConfigBuilder):
 class AdamWOptimizerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "OPTIMIZER_TYPE": "adamw",
+            "LEARNING_RATE": 0.0001,
             "WEIGHT_DECAY": 0.01,
             "B1": 0.9,
             "B2": 0.999
@@ -395,7 +394,6 @@ class SchedulerConfigBuilderFactory:
 class ExponentialSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "SCHEDULER_TYPE": "exponential",
             "GAMMA": 0.99,
             "MIN_LR": 1e-6
         }
@@ -407,7 +405,6 @@ class ExponentialSchedulerConfigBuilder(ConfigBuilder):
 class CosineWarmRestartsConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "SCHEDULER_TYPE": "cosine_warm_restarts",
             "T_0": 30,
             "T_MULT": 2,
             "MIN_LR": 1e-6
@@ -420,7 +417,6 @@ class CosineWarmRestartsConfigBuilder(ConfigBuilder):
 class OneCycleSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "SCHEDULER_TYPE": "onecycle",
             "MAX_LR_MULTIPLIER": 10,
             "PCT_START": 0.1,
             "DIV_FACTOR": 10,
@@ -434,7 +430,6 @@ class OneCycleSchedulerConfigBuilder(ConfigBuilder):
 class CosineSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "SCHEDULER_TYPE": "cosine",
             "MIN_LR": 1e-6
         }
 
@@ -445,7 +440,6 @@ class CosineSchedulerConfigBuilder(ConfigBuilder):
 class StepSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "SCHEDULER_TYPE": "step",
             "STEP_SIZE": 30,
             "STEP_GAMMA": 0.1
         }
