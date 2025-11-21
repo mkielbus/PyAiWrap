@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Type
+from typing import List, Type
 from enum import Enum
 import torch
 from .config import buildNeuralNetworkFromJson
 from .neural_network import ConvAttenColorizationNetwork
+from pyaiwrap.config import Config
 
 
 class GeneratorType(Enum):
@@ -21,7 +22,7 @@ class GeneratorFactory(ABC):
     """Abstract base class for generator factories."""
 
     @abstractmethod
-    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, hyperparams: Dict[str, Any]) -> torch.nn.Module:
+    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
         pass
 
     @abstractmethod
@@ -30,8 +31,8 @@ class GeneratorFactory(ABC):
 
 
 class StandaloneGeneratorFactory(GeneratorFactory):
-    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, hyperparams: Dict[str, Any]) -> torch.nn.Module:
-        architecture_path = hyperparams.get("ARCHITECTURE_PATH", "./network_architectures/generators/")
+    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
+        architecture_path = config["ARCHITECTURE_PATH"]
         generator = buildNeuralNetworkFromJson(
             f"{architecture_path}{architecture_id}.json"
         )
@@ -42,9 +43,9 @@ class StandaloneGeneratorFactory(GeneratorFactory):
 
 
 class SubmodularGeneratorFactory(GeneratorFactory):
-    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, hyperparams: Dict[str, Any]) -> torch.nn.Module:
-        architecture_path = hyperparams.get("ARCHITECTURE_PATH", "./network_architectures/generators/")
-        modular_class_type = hyperparams.get("MODULAR_CLASS", ModularClassType.CONV_ATTEN_COLORIZATION)
+    def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
+        architecture_path = config["ARCHITECTURE_PATH"]
+        modular_class_type = config["MODULAR_CLASS"]
         modular_class_type = ModularClassType(modular_class_type)
 
         trainable_network = buildNeuralNetworkFromJson(
@@ -80,36 +81,30 @@ class GeneratorCreator:
     }
 
     @classmethod
-    def createGenerator(cls, generator_type: GeneratorType, architecture_id: str, 
-                        submodules: List[str], device: torch.device, hyperparams: Dict[str, Any]) -> torch.nn.Module:
+    def createGenerator(cls, generator_type: GeneratorType, architecture_id: str,
+                        submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
         """Create generator based on type."""
-        try:
-            factory = cls._factories[generator_type]
-        except KeyError:
-            factory = StandaloneGeneratorFactory()
-
-        generator = factory.createGenerator(architecture_id, submodules, device, hyperparams)
-
-        return generator
+        factory = cls._factories[generator_type]
+        return factory.createGenerator(architecture_id, submodules, device, config)
 
 
-def createGenerator(hyperparams: Dict[str, Any], device: torch.device) -> torch.nn.Module:
+def createGenerator(config: Config, device: torch.device) -> torch.nn.Module:
     """
     Create generator based on hyperparameters.
 
     Args:
-        hyperparams: Dictionary of hyperparameters
+        config: Dictionary of hyperparameters
         device: Device to load the model to
 
     Returns:
         Generator model
     """
-    architecture_id = hyperparams.get("ARCHITECTURE_ID", "default")
-    submodules = hyperparams.get("SUBMODULES", [])
+    architecture_id = config["ARCHITECTURE_ID"]
+    submodules = config["SUBMODULES"]
 
     if submodules:
         generator_type = GeneratorType.SUBMODULAR
     else:
         generator_type = GeneratorType.STANDALONE
 
-    return GeneratorCreator.createGenerator(generator_type, architecture_id, submodules, device, hyperparams)
+    return GeneratorCreator.createGenerator(generator_type, architecture_id, submodules, device, config)

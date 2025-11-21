@@ -3,6 +3,117 @@ import json
 from .neural_network import NeuralNetwork
 from abc import ABC, abstractmethod
 from enum import Enum
+import copy
+
+
+class ConfigurationError(Exception):
+    """Base exception for configuration-related errors."""
+    pass
+
+
+class MissingDataTypeError(ConfigurationError):
+    """Raised when DATA_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("DATA_TYPE key is required in the configuration JSON file.")
+
+
+class MissingOutputTypeError(ConfigurationError):
+    """Raised when OUTPUT_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("OUTPUT_TYPE key is required in the configuration JSON file.")
+
+
+class MissingTrainingTypeError(ConfigurationError):
+    """Raised when TRAINING_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("TRAINING_TYPE key is required in the configuration JSON file.")
+
+
+class MissingOptimizerTypeError(ConfigurationError):
+    """Raised when OPTIMIZER_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("OPTIMIZER_TYPE key is required in the configuration JSON file.")
+
+
+class MissingSchedulerTypeError(ConfigurationError):
+    """Raised when SCHEDULER_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("SCHEDULER_TYPE key is required in the configuration JSON file.")
+
+
+class MissingLossTypesError(ConfigurationError):
+    """Raised when LOSS_TYPES is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("LOSS_TYPES key is required in the configuration JSON file.")
+
+
+class MissingModelTypeError(ConfigurationError):
+    """Raised when MODEL_TYPE is missing from JSON configuration."""
+
+    def __init__(self):
+        super().__init__("MODEL_TYPE key is required in the configuration JSON file.")
+
+
+class InvalidDataTypeError(ConfigurationError):
+    """Raised when DATA_TYPE value cannot be converted to DataType enum."""
+
+    def __init__(self, data_type: str):
+        super().__init__(f"Invalid DATA_TYPE value: '{data_type}'. Must be one of: {[e.value for e in DataType]}")
+
+
+class InvalidOutputTypeError(ConfigurationError):
+    """Raised when OUTPUT_TYPE value cannot be converted to OutputType enum."""
+
+    def __init__(self, output_type: str):
+        super().__init__(f"Invalid OUTPUT_TYPE value: '{output_type}'. Must be one of: {[e.value for e in OutputType]}")
+
+
+class InvalidTrainingTypeError(ConfigurationError):
+    """Raised when TRAINING_TYPE value cannot be converted to TrainingType enum."""
+
+    def __init__(self, training_type: str):
+        super().__init__(f"Invalid TRAINING_TYPE value: '{training_type}'. Must be one of: {[e.value for e in TrainingType]}")
+
+
+class InvalidOptimizerTypeError(ConfigurationError):
+    """Raised when OPTIMIZER_TYPE value cannot be converted to OptimizerType enum."""
+
+    def __init__(self, optimizer_type: str):
+        super().__init__(f"Invalid OPTIMIZER_TYPE value: '{optimizer_type}'. Must be one of: {[e.value for e in OptimizerType]}")
+
+
+class InvalidSchedulerTypeError(ConfigurationError):
+    """Raised when SCHEDULER_TYPE value cannot be converted to SchedulerType enum."""
+
+    def __init__(self, scheduler_type: str):
+        super().__init__(f"Invalid SCHEDULER_TYPE value: '{scheduler_type}'. Must be one of: {[e.value for e in SchedulerType]}")
+
+
+class InvalidLossTypeError(ConfigurationError):
+    """Raised when a value in LOSS_TYPES cannot be converted to LossType enum."""
+
+    def __init__(self, loss_type: str):
+        super().__init__(f"Invalid loss type: '{loss_type}'. Must be one of: {[e.value for e in LossType]}")
+
+
+class InvalidModelTypeError(ConfigurationError):
+    """Raised when MODEL_TYPE value cannot be converted to ModelType enum."""
+
+    def __init__(self, model_type: str):
+        super().__init__(f"Invalid MODEL_TYPE value: '{model_type}'. Must be one of: {[e.value for e in ModelType]}")
+
+
+class InvalidFieldsError(ConfigurationError):
+    """Raised when keys in input JSON are invalid."""
+
+    def __init__(self, fields_names: str):
+        super().__init__(f"Invalid fields in input json file: '{fields_names}'")
 
 
 def loadLayersFromJson(file_path: str) -> List[Dict[str, Any]]:
@@ -27,6 +138,16 @@ class ConfigCategory(Enum):
     LOSS = "loss"
     MODEL = "model"
     OUTPUT = "output"
+
+
+class DataType(Enum):
+    """Enum representing different data types."""
+    COLORIZATION = "colorization"
+
+
+class OutputType(Enum):
+    """Enum representing different output types."""
+    STANDARD = "standard"
 
 
 class SchedulerType(Enum):
@@ -65,6 +186,38 @@ class TrainingType(Enum):
     GAN = "gan"
 
 
+class Config:
+    """Configuration class that wraps dictionary data with type-safe access."""
+
+    def __init__(self):
+        self._data: Dict[str, Any] = {}
+
+    def __getitem__(self, key: str) -> Any:
+        """Allow dictionary-style access."""
+        return self._data[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._data[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Safe get with default value."""
+        return self._data.get(key, default)
+
+    def update(self, other: Dict[str, Any]) -> None:
+        """Update configuration with another dictionary."""
+        self._data.update(other)
+
+    def toDict(self) -> Dict[str, Any]:
+        """Convert Config to dictionary."""
+        return copy.deepcopy(self._data)
+
+    def copy(self) -> 'Config':
+        return Config(copy.deepcopy(self._data))
+
+
 class ConfigBuilder(ABC):
     """Abstract base class for configuration builders."""
 
@@ -89,7 +242,20 @@ class ConfigBuilder(ABC):
         return config
 
 
-class DataConfigBuilder(ConfigBuilder):
+class DataConfigBuilderFactory:
+    """Factory for creating data-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(data_type: DataType) -> ConfigBuilder:
+        """Create appropriate data builder based on type."""
+        builder_mapping = {
+            DataType.COLORIZATION: ColorizationDataConfigBuilder()
+        }
+
+        return builder_mapping.get(data_type, ColorizationDataConfigBuilder())
+
+
+class ColorizationDataConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "BATCH_SIZE": 1,
@@ -104,6 +270,32 @@ class DataConfigBuilder(ConfigBuilder):
 
     def getCategory(self) -> ConfigCategory:
         return ConfigCategory.DATA
+
+
+class OutputConfigBuilderFactory:
+    """Factory for creating output-specific configuration builders."""
+
+    @staticmethod
+    def createBuilder(output_type: OutputType) -> ConfigBuilder:
+        """Create appropriate output builder based on type."""
+        builder_mapping = {
+            OutputType.STANDARD: StandardOutputConfigBuilder()
+        }
+
+        return builder_mapping.get(output_type, StandardOutputConfigBuilder())
+
+
+class StandardOutputConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "DIAGRAMS_DATA_PATH": "./diagrams_data",
+            "WEIGHTS_PATH": "./weights",
+            "DIAGRAMS_PATH": "./diagrams",
+            "VISUALIZE_EVERY": 5
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.OUTPUT
 
 
 class TrainingConfigBuilderFactory:
@@ -316,8 +508,7 @@ class ColorfulnessLossConfigBuilder(ConfigBuilder):
 class VAELossConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "KL_BETA": 0.01,
-            "LATENT_DIM": 1024
+            "KL_BETA": 0.01
         }
 
     def getCategory(self) -> ConfigCategory:
@@ -374,29 +565,13 @@ class VAEModelConfigBuilder(StandardModelConfigBuilder):
         return parent_defaults
 
 
-class OutputConfigBuilder(ConfigBuilder):
-    def getDefaults(self) -> Dict[str, Any]:
-        return {
-            "DIAGRAMS_DATA_PATH": "./diagrams_data",
-            "WEIGHTS_PATH": "./weights",
-            "DIAGRAMS_PATH": "./diagrams",
-            "VISUALIZE_EVERY": 5
-        }
-
-    def getCategory(self) -> ConfigCategory:
-        return ConfigCategory.OUTPUT
-
-
-class HyperparametersDirector:
+class ConfigDirector:
     """Director class that orchestrates the configuration building process."""
 
     def __init__(self):
-        self._base_builders: Dict[ConfigCategory, ConfigBuilder] = {
-            ConfigCategory.DATA: DataConfigBuilder(),
-            ConfigCategory.OUTPUT: OutputConfigBuilder()
-        }
+        pass
 
-    def loadHyperparameters(self, json_path: str) -> Dict[str, Any]:
+    def loadConfig(self, json_path: str) -> Config:
         """
         Load hyperparameters from a JSON file with categorized defaults.
 
@@ -404,94 +579,147 @@ class HyperparametersDirector:
             json_path (str): Path to the JSON file containing hyperparameters.
 
         Returns:
-            Dict[str, Any]: A dictionary with hyperparameters and their values.
+            Config: A Config object with hyperparameters and their values.
         """
         with open(json_path, "r") as f:
             user_params = json.load(f)
 
-        final_config = {}
+        final_config = Config()
 
-        for builder in self._base_builders.values():
-            category_config = builder.build(user_params)
-            final_config.update(category_config)
+        self._buildDataConfig(user_params, final_config)
+        self._buildOutputConfig(user_params, final_config)
+        self._buildTrainingConfig(user_params, final_config)
+        self._buildOptimizerConfig(user_params, final_config)
+        self._buildSchedulerConfig(user_params, final_config)
+        self._buildLossConfig(user_params, final_config)
+        self._buildModelConfig(user_params, final_config)
 
-        training_type_str = user_params.get("TRAINING_TYPE", "standard")
+        if set(user_params.keys()) - set(final_config.toDict().keys()):
+            invalid_keys = set(user_params.keys()) - set(final_config.toDict().keys())
+            raise InvalidFieldsError(", ".join(invalid_keys))
+
+        return final_config
+
+    def _buildDataConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build data configuration using factory pattern."""
+        if "DATA_TYPE" not in user_params:
+            raise MissingDataTypeError()
+
+        data_type_str = user_params["DATA_TYPE"]
+        try:
+            data_type = DataType(data_type_str)
+        except ValueError:
+            raise InvalidDataTypeError(data_type_str)
+
+        data_builder = DataConfigBuilderFactory.createBuilder(data_type)
+        data_config = data_builder.build(Config(user_params))
+        final_config.update(data_config)
+
+    def _buildOutputConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build output configuration using factory pattern."""
+        if "OUTPUT_TYPE" not in user_params:
+            raise MissingOutputTypeError()
+
+        output_type_str = user_params["OUTPUT_TYPE"]
+        try:
+            output_type = OutputType(output_type_str)
+        except ValueError:
+            raise InvalidOutputTypeError(output_type_str)
+
+        output_builder = OutputConfigBuilderFactory.createBuilder(output_type)
+        output_config = output_builder.build(Config(user_params))
+        final_config.update(output_config)
+
+    def _buildTrainingConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build training configuration using factory pattern."""
+        if "TRAINING_TYPE" not in user_params:
+            raise MissingTrainingTypeError()
+
+        training_type_str = user_params["TRAINING_TYPE"]
         try:
             training_type = TrainingType(training_type_str)
-            training_builder = TrainingConfigBuilderFactory.createBuilder(training_type)
-            training_config = training_builder.build(user_params)
-            final_config.update(training_config)
         except ValueError:
-            default_training_builder = TrainingConfigBuilderFactory.createBuilder(TrainingType.STANDARD)
-            training_config = default_training_builder.build(user_params)
-            final_config.update(training_config)
+            raise InvalidTrainingTypeError(training_type_str)
 
-        optimizer_type_str = user_params.get("OPTIMIZER_TYPE", "adamw")
+        training_builder = TrainingConfigBuilderFactory.createBuilder(training_type)
+        training_config = training_builder.build(Config(user_params))
+        final_config.update(training_config)
+
+    def _buildOptimizerConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build optimizer configuration using factory pattern."""
+        if "OPTIMIZER_TYPE" not in user_params:
+            raise MissingOptimizerTypeError()
+
+        optimizer_type_str = user_params["OPTIMIZER_TYPE"]
         try:
             optimizer_type = OptimizerType(optimizer_type_str)
-            optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(optimizer_type)
-            optimizer_config = optimizer_builder.build(user_params)
-            final_config.update(optimizer_config)
         except ValueError:
-            default_optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(OptimizerType.ADAMW)
-            optimizer_config = default_optimizer_builder.build(user_params)
-            final_config.update(optimizer_config)
+            raise InvalidOptimizerTypeError(optimizer_type_str)
 
-        scheduler_type_str = user_params.get("SCHEDULER_TYPE", "exponential")
+        optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(optimizer_type)
+        optimizer_config = optimizer_builder.build(Config(user_params))
+        final_config.update(optimizer_config)
+
+    def _buildSchedulerConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build scheduler configuration using factory pattern."""
+        if "SCHEDULER_TYPE" not in user_params:
+            raise MissingSchedulerTypeError()
+
+        scheduler_type_str = user_params["SCHEDULER_TYPE"]
         try:
             scheduler_type = SchedulerType(scheduler_type_str)
-            scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(scheduler_type)
-            scheduler_config = scheduler_builder.build(user_params)
-            final_config.update(scheduler_config)
         except ValueError:
-            default_scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(SchedulerType.EXPONENTIAL)
-            scheduler_config = default_scheduler_builder.build(user_params)
-            final_config.update(scheduler_config)
+            raise InvalidSchedulerTypeError(scheduler_type_str)
+
+        scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(scheduler_type)
+        scheduler_config = scheduler_builder.build(Config(user_params))
+        final_config.update(scheduler_config)
+
+    def _buildLossConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build loss configuration using factory pattern."""
+        if "LOSS_TYPES" not in user_params:
+            raise MissingLossTypesError()
 
         loss_types = self._getEnabledLossTypes(user_params)
         for loss_type in loss_types:
             loss_builder = LossConfigBuilderFactory.createBuilder(loss_type)
-            loss_config = loss_builder.build(user_params)
+            loss_config = loss_builder.build(Config(user_params))
             final_config.update(loss_config)
+
+    def _buildModelConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
+        """Build model configuration using factory pattern."""
+        if "MODEL_TYPE" not in user_params:
+            raise MissingModelTypeError()
 
         model_type = self._getModelType(user_params)
         model_builder = ModelConfigBuilderFactory.createBuilder(model_type)
-        model_config = model_builder.build(user_params)
+        model_config = model_builder.build(Config(user_params))
         final_config.update(model_config)
 
-        return final_config
-
     def _getEnabledLossTypes(self, user_params: Dict[str, Any]) -> list[LossType]:
-        """Determine which loss types are enabled based on user parameters."""
+        """Determine which loss types are enabled based on LOSS_TYPES from JSON."""
+        loss_types_list = user_params["LOSS_TYPES"]
         enabled_loss_types = []
 
-        enabled_loss_types.append(LossType.BASIC)
-
-        if user_params.get("USE_LPIPS", False) or user_params.get("PERCEPTUAL_WEIGHT", 0.0) > 0:
-            enabled_loss_types.append(LossType.PERCEPTUAL)
-
-        if user_params.get("COLORFULNESS_WEIGHT", 0.0) > 0:
-            enabled_loss_types.append(LossType.COLORFULNESS)
-
-        if user_params.get("KL_BETA", 0.0) > 0:
-            enabled_loss_types.append(LossType.VAE)
+        for loss_type_str in loss_types_list:
+            try:
+                loss_type = LossType(loss_type_str.lower())
+                enabled_loss_types.append(loss_type)
+            except ValueError:
+                raise InvalidLossTypeError(loss_type_str)
 
         return enabled_loss_types
 
     def _getModelType(self, user_params: Dict[str, Any]) -> ModelType:
-        """Determine model type based on user parameters."""
-        submodules = user_params.get("SUBMODULES", {})
-        kl_beta = user_params.get("KL_BETA", 0.0)
-
-        if kl_beta > 0:
-            return ModelType.VAE
-        elif submodules:
-            return ModelType.SUBMODULAR
-        else:
-            return ModelType.STANDARD
+        """Determine model type based on MODEL_TYPE from JSON."""
+        model_type_str = user_params["MODEL_TYPE"]
+        try:
+            return ModelType(model_type_str.lower())
+        except ValueError:
+            raise InvalidModelTypeError(model_type_str)
 
 
-def loadHyperparameters(json_path: str) -> Dict[str, Any]:
+def loadConfig(json_path: str) -> Config:
     """
     Load hyperparameters from a JSON file with enhanced defaults.
 
@@ -499,7 +727,7 @@ def loadHyperparameters(json_path: str) -> Dict[str, Any]:
         json_path (str): Path to the JSON file containing hyperparameters.
 
     Returns:
-        Dict[str, Any]: A dictionary with hyperparameters and their values.
+        Config: A Config object with hyperparameters and their values.
     """
-    hyperparams_director = HyperparametersDirector()
-    return hyperparams_director.loadHyperparameters(json_path)
+    hyperparams_director = ConfigDirector()
+    return hyperparams_director.loadConfig(json_path)

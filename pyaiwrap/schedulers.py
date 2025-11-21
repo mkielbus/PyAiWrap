@@ -1,8 +1,8 @@
 import torch
-from typing import Dict, Any
 from abc import ABC, abstractmethod
 from enum import Enum
 from copy import deepcopy
+from pyaiwrap.config import Config
 
 
 class SchedulerType(Enum):
@@ -18,58 +18,58 @@ class SchedulerFactory(ABC):
     """Abstract base class for scheduler factories."""
 
     @abstractmethod
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
+    def createScheduler(self, optimizer, config: Config):
         pass
 
 
 class CosineWarmRestartsFactory(SchedulerFactory):
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
+    def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=hyperparams.get("T_0", 30),
-            T_mult=hyperparams.get("T_MULT", 2),
-            eta_min=hyperparams.get("MIN_LR", 1e-6)
+            T_0=config["T_0"],
+            T_mult=config["T_MULT"],
+            eta_min=config["MIN_LR"]
         )
 
 
 class OneCycleFactory(SchedulerFactory):
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
-        learningRate = hyperparams.get("LEARNING_RATE", 0.0001)
-        trainingDatasetSize = hyperparams.get("TRAINING_DATASET_SIZE", 1)
+    def createScheduler(self, optimizer, config: Config):
+        learningRate = config["LEARNING_RATE"]
+        trainingDatasetSize = config["TRAINING_DATASET_SIZE"]
         return torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=learningRate * hyperparams.get("MAX_LR_MULTIPLIER", 10),
-            epochs=hyperparams.get("EPOCHS", 100),
+            max_lr=learningRate * config["MAX_LR_MULTIPLIER"],
+            epochs=config["EPOCHS"],
             steps_per_epoch=trainingDatasetSize,
-            pct_start=hyperparams.get("PCT_START", 0.1),
-            div_factor=hyperparams.get("DIV_FACTOR", 10),
-            final_div_factor=hyperparams.get("FINAL_DIV_FACTOR", 100)
+            pct_start=config["PCT_START"],
+            div_factor=config["DIV_FACTOR"],
+            final_div_factor=config["FINAL_DIV_FACTOR"]
         )
 
 
 class CosineFactory(SchedulerFactory):
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
+    def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=hyperparams.get("EPOCHS", 100),
-            eta_min=hyperparams.get("MIN_LR", 1e-6)
+            T_max=config["EPOCHS"],
+            eta_min=config["MIN_LR"]
         )
 
 
 class StepFactory(SchedulerFactory):
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
+    def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.StepLR(
             optimizer,
-            step_size=hyperparams.get("STEP_SIZE", 30),
-            gamma=hyperparams.get("STEP_GAMMA", 0.1)
+            step_size=config["STEP_SIZE"],
+            gamma=config["STEP_GAMMA"]
         )
 
 
 class ExponentialFactory(SchedulerFactory):
-    def createScheduler(self, optimizer, hyperparams: Dict[str, Any]):
+    def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.ExponentialLR(
             optimizer,
-            gamma=hyperparams.get("GAMMA", 0.99)
+            gamma=config["GAMMA"]
         )
 
 
@@ -85,30 +85,26 @@ class SchedulerCreator:
     }
 
     @classmethod
-    def createScheduler(cls, schedulerType: str, optimizer, hyperparams: Dict[str, Any]):
-        try:
-            schedulerEnum = SchedulerType(schedulerType)
-            factory = cls._factories[schedulerEnum]
-        except (KeyError, ValueError):
-            factory = ExponentialFactory()
-        return factory.createScheduler(optimizer, hyperparams)
+    def createScheduler(cls, scheduler_type: SchedulerType, optimizer, config: Config):
+        factory = cls._factories[scheduler_type]
+        return factory.createScheduler(optimizer, config)
 
 
-def createScheduler(optimizer, hyperparams: Dict[str, Any], train_loader_len: int):
+def createScheduler(optimizer, config: Config, train_loader_len: int):
     """
     Create learning rate scheduler based on hyperparameters.
 
     Args:
         optimizer: The optimizer to schedule
-        hyperparams: Dictionary of hyperparameters
+        config: Dictionary of hyperparameters
         train_loader_len: Length of train loader (steps per epoch)
         epochs: Total number of epochs
 
     Returns:
         Configured learning rate scheduler
     """
-    hyperparams_with_dataset_size = deepcopy(hyperparams)
-    hyperparams_with_dataset_size["TRAINING_DATASET_SIZE"] = train_loader_len
+    config_with_dataset_size = deepcopy(config)
+    config_with_dataset_size["TRAINING_DATASET_SIZE"] = train_loader_len
 
-    schedulerType = hyperparams_with_dataset_size.get("SCHEDULER_TYPE", "exponential")
-    return SchedulerCreator.createScheduler(schedulerType, optimizer, hyperparams_with_dataset_size)
+    scheduler_type = SchedulerType(config_with_dataset_size["SCHEDULER_TYPE"])
+    return SchedulerCreator.createScheduler(scheduler_type, optimizer, config_with_dataset_size)
