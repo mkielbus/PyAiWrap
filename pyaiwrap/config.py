@@ -258,6 +258,7 @@ class DataConfigBuilderFactory:
 class ColorizationDataConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "DATA_TYPE": "colorization",
             "BATCH_SIZE": 1,
             "TRAIN_DATA_PATH": "./data/DIV2K_train_LR_bicubic/X4",
             "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
@@ -288,6 +289,7 @@ class OutputConfigBuilderFactory:
 class StandardOutputConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "OUTPUT_TYPE": "standard",
             "DIAGRAMS_DATA_PATH": "./diagrams_data",
             "WEIGHTS_PATH": "./weights",
             "DIAGRAMS_PATH": "./diagrams",
@@ -315,6 +317,7 @@ class TrainingConfigBuilderFactory:
 class StandardTrainingConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "TRAINING_TYPE": "standard",
             "EPOCHS": 300,
             "PATIENCE": 30,
             "GRADIENT_CLIP": 1.0
@@ -330,6 +333,7 @@ class GANTrainingConfigBuilder(StandardTrainingConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         parent_defaults = super().getDefaults()
         parent_defaults.update({
+            "TRAINING_TYPE": "gan",
             "WARMUP_EPOCHS": 15
         })
         return parent_defaults
@@ -352,6 +356,7 @@ class OptimizerConfigBuilderFactory:
 class AdamOptimizerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "OPTIMIZER_TYPE": "adam",
             "LEARNING_RATE": 0.0001,
             "B1": 0.9,
             "B2": 0.999
@@ -364,6 +369,7 @@ class AdamOptimizerConfigBuilder(ConfigBuilder):
 class AdamWOptimizerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "OPTIMIZER_TYPE": "adamw",
             "LEARNING_RATE": 0.0001,
             "WEIGHT_DECAY": 0.01,
             "B1": 0.9,
@@ -394,6 +400,7 @@ class SchedulerConfigBuilderFactory:
 class ExponentialSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "SCHEDULER_TYPE": "exponential",
             "GAMMA": 0.99,
             "MIN_LR": 1e-6
         }
@@ -405,6 +412,7 @@ class ExponentialSchedulerConfigBuilder(ConfigBuilder):
 class CosineWarmRestartsConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "SCHEDULER_TYPE": "cosine_warm_restarts",
             "T_0": 30,
             "T_MULT": 2,
             "MIN_LR": 1e-6
@@ -417,6 +425,7 @@ class CosineWarmRestartsConfigBuilder(ConfigBuilder):
 class OneCycleSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "SCHEDULER_TYPE": "onecycle",
             "MAX_LR_MULTIPLIER": 10,
             "PCT_START": 0.1,
             "DIV_FACTOR": 10,
@@ -430,6 +439,7 @@ class OneCycleSchedulerConfigBuilder(ConfigBuilder):
 class CosineSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "SCHEDULER_TYPE": "cosine",
             "MIN_LR": 1e-6
         }
 
@@ -440,6 +450,7 @@ class CosineSchedulerConfigBuilder(ConfigBuilder):
 class StepSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "SCHEDULER_TYPE": "step",
             "STEP_SIZE": 30,
             "STEP_GAMMA": 0.1
         }
@@ -525,6 +536,7 @@ class ModelConfigBuilderFactory:
 class StandardModelConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
+            "MODEL_TYPE": "standard",
             "HYPERPARAMS_ID": "0",
             "ARCHITECTURE_ID": "0",
             "ARCHITECTURE_PATH": "./network_architectures/generators/",
@@ -541,6 +553,7 @@ class SubmodularModelConfigBuilder(StandardModelConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         parent_defaults = super().getDefaults()
         parent_defaults.update({
+            "MODEL_TYPE": "submodular",
             "MODULAR_CLASS": "ConvAttenColorizationNetwork"
         })
         return parent_defaults
@@ -552,6 +565,7 @@ class VAEModelConfigBuilder(StandardModelConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         parent_defaults = super().getDefaults()
         parent_defaults.update({
+            "MODEL_TYPE": "vae",
             "LATENT_DIM": 1024
         })
         return parent_defaults
@@ -586,9 +600,8 @@ class ConfigDirector:
         self._buildLossConfig(user_params, final_config)
         self._buildModelConfig(user_params, final_config)
 
-        passed_keys = set(["SCHEDULER_TYPE", "OPTIMIZER_TYPE", "TRAINING_TYPE", "DATA_TYPE", "OUTPUT_TYPE",
-                          "LOSS_TYPES", "MODEL_TYPE"])
-        excessive_keys = set(user_params.keys()) - passed_keys - set(final_config.toDict().keys())
+        final_config["LOSS_TYPES"] = user_params["LOSS_TYPES"]
+        excessive_keys = set(user_params.keys()) - set(final_config.toDict().keys())
         if excessive_keys:
             raise InvalidFieldsError(", ".join(excessive_keys))
 
