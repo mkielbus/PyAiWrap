@@ -179,6 +179,7 @@ class GANMetrics(BaseMetrics):
 
     def display(self, epoch: int) -> None:
         """Display GAN-specific metrics"""
+        print()
         for phase in ['train', 'val']:
             metrics_dict = self._current_epoch_metrics[phase]
 
@@ -221,6 +222,7 @@ class VAEMetrics(BaseMetrics):
 
     def display(self, epoch: int) -> None:
         """Display VAE-specific metrics"""
+        print()
         for phase in ['train', 'val']:
             metrics_dict = self._current_epoch_metrics[phase]
 
@@ -260,6 +262,7 @@ class GeneratorColorizationMetrics(BaseMetrics):
 
     def display(self, epoch: int) -> None:
         """Display colorization-specific metrics"""
+        print()
         for phase in ['train', 'val']:
             metrics_dict = self._current_epoch_metrics[phase]
 
