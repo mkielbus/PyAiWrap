@@ -461,16 +461,16 @@ class LossConfigBuilderFactory:
     def createBuilder(loss_type: LossType) -> ConfigBuilder:
         """Create appropriate loss builder based on type."""
         builder_mapping = {
-            LossType.BASIC: BasicLossConfigBuilder(),
+            LossType.RECONSTRUCTION: ReconstructionLossConfigBuilder(),
             LossType.PERCEPTUAL: PerceptualLossConfigBuilder(),
             LossType.COLORFULNESS: ColorfulnessLossConfigBuilder(),
             LossType.VAE: VAELossConfigBuilder()
         }
 
-        return builder_mapping.get(loss_type, BasicLossConfigBuilder())
+        return builder_mapping.get(loss_type, ReconstructionLossConfigBuilder())
 
 
-class BasicLossConfigBuilder(ConfigBuilder):
+class ReconstructionLossConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "RECON_WEIGHT": 1.0
