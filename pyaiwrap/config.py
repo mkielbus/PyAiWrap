@@ -612,7 +612,7 @@ class ConfigDirector:
             raise InvalidDataTypeError(data_type_str)
 
         data_builder = DataConfigBuilderFactory.createBuilder(data_type)
-        data_config = data_builder.build(Config(user_params))
+        data_config = data_builder.build(user_params)
         final_config.update(data_config)
 
     def _buildOutputConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -627,7 +627,7 @@ class ConfigDirector:
             raise InvalidOutputTypeError(output_type_str)
 
         output_builder = OutputConfigBuilderFactory.createBuilder(output_type)
-        output_config = output_builder.build(Config(user_params))
+        output_config = output_builder.build(user_params)
         final_config.update(output_config)
 
     def _buildTrainingConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -642,7 +642,7 @@ class ConfigDirector:
             raise InvalidTrainingTypeError(training_type_str)
 
         training_builder = TrainingConfigBuilderFactory.createBuilder(training_type)
-        training_config = training_builder.build(Config(user_params))
+        training_config = training_builder.build(user_params)
         final_config.update(training_config)
 
     def _buildOptimizerConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -657,7 +657,7 @@ class ConfigDirector:
             raise InvalidOptimizerTypeError(optimizer_type_str)
 
         optimizer_builder = OptimizerConfigBuilderFactory.createBuilder(optimizer_type)
-        optimizer_config = optimizer_builder.build(Config(user_params))
+        optimizer_config = optimizer_builder.build(user_params)
         final_config.update(optimizer_config)
 
     def _buildSchedulerConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -672,7 +672,7 @@ class ConfigDirector:
             raise InvalidSchedulerTypeError(scheduler_type_str)
 
         scheduler_builder = SchedulerConfigBuilderFactory.createBuilder(scheduler_type)
-        scheduler_config = scheduler_builder.build(Config(user_params))
+        scheduler_config = scheduler_builder.build(user_params)
         final_config.update(scheduler_config)
 
     def _buildLossConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -683,7 +683,7 @@ class ConfigDirector:
         loss_types = self._getEnabledLossTypes(user_params)
         for loss_type in loss_types:
             loss_builder = LossConfigBuilderFactory.createBuilder(loss_type)
-            loss_config = loss_builder.build(Config(user_params))
+            loss_config = loss_builder.build(user_params)
             final_config.update(loss_config)
 
     def _buildModelConfig(self, user_params: Dict[str, Any], final_config: Config) -> None:
@@ -693,7 +693,7 @@ class ConfigDirector:
 
         model_type = self._getModelType(user_params)
         model_builder = ModelConfigBuilderFactory.createBuilder(model_type)
-        model_config = model_builder.build(Config(user_params))
+        model_config = model_builder.build(user_params)
         final_config.update(model_config)
 
     def _getEnabledLossTypes(self, user_params: Dict[str, Any]) -> list[LossType]:
