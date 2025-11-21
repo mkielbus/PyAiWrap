@@ -96,7 +96,15 @@ def train(
     first_batch_train = tuple(item.to(device) if isinstance(item, torch.Tensor) else item for item in first_batch_train)
     first_batch_val = tuple(item.to(device) if isinstance(item, torch.Tensor) else item for item in first_batch_val)
 
-    for epoch in range(num_epochs):
+    epoch_iterator = tqdm(
+            range(num_epochs),
+            total=num_epochs,
+            desc="Epochs passed",
+            leave=False,
+            position=0
+        )
+
+    for epoch in epoch_iterator:
         metrics.setPhase('train')
 
         for model in models.values():
@@ -105,8 +113,9 @@ def train(
         train_iterator = tqdm(
             train_loader,
             total=len(train_loader),
-            desc=f"Epoch {epoch+1}/{num_epochs} [Training]",
-            leave=False
+            desc="[Training]",
+            leave=False,
+            position=1
         )
 
         for batch in train_iterator:
@@ -140,8 +149,9 @@ def train(
         val_iterator = tqdm(
             validation_loader,
             total=len(validation_loader),
-            desc=f"Epoch {epoch+1}/{num_epochs} [Validation]",
-            leave=False
+            desc="[Validation]",
+            leave=False,
+            position=1
         )
 
         with torch.no_grad():
