@@ -161,7 +161,7 @@ class SchedulerType(Enum):
 
 class LossType(Enum):
     """Enum representing different loss types."""
-    BASIC = "basic"
+    RECONSTRUCTION = "reconstruction"
     PERCEPTUAL = "perceptual"
     COLORFULNESS = "colorfulness"
     VAE = "vae"
@@ -315,7 +315,6 @@ class TrainingConfigBuilderFactory:
 class StandardTrainingConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "TRAINING_TYPE": "standard",
             "EPOCHS": 300,
             "LEARNING_RATE": 0.0001,
             "PATIENCE": 30,
@@ -332,7 +331,6 @@ class GANTrainingConfigBuilder(StandardTrainingConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         parent_defaults = super().getDefaults()
         parent_defaults.update({
-            "TRAINING_TYPE": "gan",
             "WARMUP_EPOCHS": 15
         })
         return parent_defaults
@@ -497,7 +495,7 @@ class PerceptualLossConfigBuilder(ConfigBuilder):
 class ColorfulnessLossConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
-            "COLORFULNESS_WEIGHT": 0.01,
+            "COLORFULNESS_WEIGHT": 0.005,
             "COLORFULNESS_TARGET": None
         }
 
@@ -582,7 +580,7 @@ class ConfigDirector:
             Config: A Config object with hyperparameters and their values.
         """
         with open(json_path, "r") as f:
-            user_params = json.load(f)
+            user_params: Dict[str, Any] = json.load(f)
 
         final_config = Config()
 
@@ -594,9 +592,11 @@ class ConfigDirector:
         self._buildLossConfig(user_params, final_config)
         self._buildModelConfig(user_params, final_config)
 
-        if set(user_params.keys()) - set(final_config.toDict().keys()):
-            invalid_keys = set(user_params.keys()) - set(final_config.toDict().keys())
-            raise InvalidFieldsError(", ".join(invalid_keys))
+        passed_keys = set("SCHEDULER_TYPE", "OPTIMIZER_TYPE", "TRAINING_TYPE", "DATA_TYPE", "OUTPUT_TYPE",
+                          "LOSS_TYPES", "MODEL_TYPE")
+        excessive_keys = set(user_params.keys()) - passed_keys - set(final_config.toDict().keys())
+        if excessive_keys:
+            raise InvalidFieldsError(", ".join(excessive_keys))
 
         return final_config
 
