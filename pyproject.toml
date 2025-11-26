@@ -1,0 +1,37 @@
+[project]
+name = "PyAiWrap"
+version = "1.0.0"
+description = "Neural network skeleton with dynamic layer construction from JSON"
+authors = [
+    {name = "Mateusz Kiełbus", email = "mateusz.kielbus.mk@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.9.0",
+    "torchvision==0.24.0",
+    "matplotlib==3.10.7",
+    "pandas==2.3.3",
+    "pillow==12.0.0",
+    "tqdm==4.67.1",
+    "numpy==1.26.4",
+    "opencv-python==4.9.0.80",
+    "scikit-image==0.22.0",
+    "python-docx==1.1.0",
+    "lpips==0.1.4",
+    "kornia==0.8.2",
+    "kornia_rs==0.1.10"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Data Science :: Deep Learning", 
+    "Programming :: Developers"
+]
+urls = {Homepage = "https://github.com/mkielbus/AI-in-Computer-Graphics-Labs"}
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
