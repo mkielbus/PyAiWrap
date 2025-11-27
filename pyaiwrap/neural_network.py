@@ -1530,12 +1530,14 @@ class PatchEmbedding3D(nn.Module):
             padding=padding,
         )
         self.norm = nn.LayerNorm(embed_dim)
+        self.stride = stride
 
     def forward(self, x):
         patches = self.patch_embeddings(x)  # [B, embed_dim, D, H, W]
+        B, C, D, H, W = patches.shape
         patches = patches.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
         patches = self.norm(patches)
-        return patches
+        return patches, (D, H, W)
 
 
 class DWConv3D(nn.Module):
@@ -1580,9 +1582,7 @@ class SegFormerAttention(nn.Module):
         embed_dim: int = 768,
         num_heads: int = 8,
         sr_ratio: int = 2,
-        qkv_bias: bool = False,
-        attn_dropout: float = 0.0,
-        proj_dropout: float = 0.0,
+        attn_dropout: float = 0.0
     ):
         super().__init__()
         assert embed_dim % num_heads == 0, "Embedding dim should be divisible by number of heads!"
@@ -1750,40 +1750,40 @@ class MixVisionTransformer3D(nn.Module):
     def forward(self, x):
         outputs = []
 
-        x = self.embed_1(x)
+        x, spatial_dims1 = self.embed_1(x)
         B, N, C = x.shape
-        n = cubeRoot(N)
+        D1, H1, W1 = spatial_dims1
         for blk in self.tf_block1:
             x = blk(x)
         x = self.norm1(x)
-        x = x.reshape(B, n, n, n, -1).permute(0, 4, 1, 2, 3).contiguous()  # [B, C, D, H, W]
+        x = x.reshape(B, D1, H1, W1, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
 
-        x = self.embed_2(x)
+        x, spatial_dims2 = self.embed_2(x)
         B, N, C = x.shape
-        n = cubeRoot(N)
+        D2, H2, W2 = spatial_dims2
         for blk in self.tf_block2:
             x = blk(x)
         x = self.norm2(x)
-        x = x.reshape(B, n, n, n, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x = x.reshape(B, D2, H2, W2, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
 
-        x = self.embed_3(x)
+        x, spatial_dims3 = self.embed_3(x)
         B, N, C = x.shape
-        n = cubeRoot(N)
+        D3, H3, W3 = spatial_dims3
         for blk in self.tf_block3:
             x = blk(x)
         x = self.norm3(x)
-        x = x.reshape(B, n, n, n, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x = x.reshape(B, D3, H3, W3, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
 
-        x = self.embed_4(x)
+        x, spatial_dims4 = self.embed_4(x)
         B, N, C = x.shape
-        n = cubeRoot(N)
+        D4, H4, W4 = spatial_dims4
         for blk in self.tf_block4:
             x = blk(x)
         x = self.norm4(x)
-        x = x.reshape(B, n, n, n, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x = x.reshape(B, D4, H4, W4, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
 
         return outputs
@@ -1829,12 +1829,11 @@ class SegFormerDecoderHead3D(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
         self.linear_pred = nn.Conv3d(decoder_head_embedding_dim, num_classes, kernel_size=1)
-        self.upsample_volume = nn.Upsample(scale_factor=4.0, mode="trilinear", align_corners=False)
 
     def forward(self, c1, c2, c3, c4):
         n = c4.shape[0]
 
-        _c4 = self.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3], c4.shape[4]).contiguous()  # [B, embed_dim, D, H, W]
+        _c4 = self.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3], c4.shape[4]).contiguous()
         _c4 = F.interpolate(_c4, size=c1.size()[2:], mode="trilinear", align_corners=False)
 
         _c3 = self.linear_c3(c3).permute(0, 2, 1).reshape(n, -1, c3.shape[2], c3.shape[3], c3.shape[4]).contiguous()
@@ -1845,13 +1844,14 @@ class SegFormerDecoderHead3D(nn.Module):
 
         _c1 = self.linear_c1(c1).permute(0, 2, 1).reshape(n, -1, c1.shape[2], c1.shape[3], c1.shape[4]).contiguous()
 
-        print(f"After interpolation - _c1: {_c1.shape}, _c2: {_c2.shape}, _c3: {_c3.shape}, _c4: {_c4.shape}")
-        _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))  # [B, decoder_head_embedding_dim, D, H, W]
+        _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
         x = self.dropout(_c)
-        x = self.linear_pred(x)  # [B, num_classes, D, H, W]
-        print(f"Before upsampling: {x.shape}")
-        x = self.upsample_volume(x)
-        print(f"After upsampling: {x.shape}")
+        x = self.linear_pred(x)
+        
+        # Upsample to match your target size (32, 256, 256)
+        target_size = (32, 256, 256)
+        x = F.interpolate(x, size=target_size, mode="trilinear", align_corners=False)
+
         return x
 
 
