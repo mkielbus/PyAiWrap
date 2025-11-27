@@ -1,2 +1,3 @@
 build/**
 PyAiWrap.egg-info/**
+pyaiwrap/__pycache__/**

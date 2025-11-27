@@ -1590,9 +1590,6 @@ class SegFormerAttention(nn.Module):
         self.num_heads = num_heads
         self.attention_head_dim = embed_dim // num_heads
 
-        self.query = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
-        self.key_value = nn.Linear(embed_dim, 2 * embed_dim, bias=qkv_bias)
-
         self.multi_head_attention = MultiHeadAttention(
             query_dim=embed_dim,
             value_dim=embed_dim,
@@ -1611,19 +1608,17 @@ class SegFormerAttention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape  # [B, num_patches, embed_dim]
 
-        q = self.query(x)  # [B, N, embed_dim]
-
+        q = x
         if self.sr_ratio > 1:
             n = cubeRoot(N)
             x_ = x.permute(0, 2, 1).reshape(B, C, n, n, n)  # [B, C, D, H, W]
             x_ = self.sr(x_)  # [B, C, D/sr, H/sr, W/sr]
             x_ = x_.reshape(B, C, -1).permute(0, 2, 1)  # [B, num_patches_reduced, C]
             x_ = self.sr_norm(x_)
-            kv = self.key_value(x_)  # [B, num_patches_reduced, 2 * embed_dim]
-            k, v = kv.chunk(2, dim=-1)  # [B, num_patches_reduced, embed_dim] each
+            k = v = x_
         else:
-            kv = self.key_value(x)  # [B, N, 2 * embed_dim]
-            k, v = kv.chunk(2, dim=-1)  # [B, N, embed_dim] each
+            k = q
+            v = q
 
         out = self.multi_head_attention(query=q, key=k, value=v)
         return out

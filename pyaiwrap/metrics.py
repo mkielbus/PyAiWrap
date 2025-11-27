@@ -289,3 +289,44 @@ class GeneratorColorizationMetrics(BaseMetrics):
         if self._history['val']:
             best_total_loss = min(entry['total_loss'] for entry in self._history['val'])
             print(f"  Best val loss: {best_total_loss:.6f}")
+
+
+class SegmentationMetrics(BaseMetrics):
+    """Metrics tracking for 3D segmentation training with DiceCE loss"""
+
+    def __init__(self):
+        """
+        Initialize segmentation metrics for DiceCE loss.
+        """
+        metric_keys = ['total_loss']
+        super().__init__(metric_keys)
+
+    def display(self, epoch: int) -> None:
+        """Display DiceCE loss metrics"""
+        print()
+        for phase in ['train', 'val']:
+            metrics_dict = self._current_epoch_metrics[phase]
+
+            if metrics_dict is None:
+                continue
+
+            phase_label = "Train" if phase == 'train' else "Val  "
+
+            print(
+                f"Epoch {epoch} [{phase_label}]: "
+                f"DiceCELoss: {metrics_dict['total_loss']:.4f}"
+            )
+
+        if self._history['val']:
+            best_loss = min(entry['total_loss'] for entry in self._history['val'])
+            current_val_loss = self._current_epoch_metrics['val']['total_loss'] if self._current_epoch_metrics['val'] else float('inf')
+
+            print(f"  Best val DiceCELoss: {best_loss:.4f}")
+
+            if len(self._history['val']) > 1:
+                prev_loss = self._history['val'][-2]['total_loss']
+                improvement = prev_loss - current_val_loss
+                if improvement > 0:
+                    print(f"  ↓ Improved by: {improvement:.4f}")
+                elif improvement < 0:
+                    print(f"  ↑ Worsened by: {abs(improvement):.4f}")

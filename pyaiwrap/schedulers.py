@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from copy import deepcopy
 from pyaiwrap.config import Config
+from torch.optim.lr_scheduler import _LRScheduler
+import warnings
 
 
 class SchedulerType(Enum):
@@ -12,6 +14,7 @@ class SchedulerType(Enum):
     COSINE = "cosine"
     STEP = "step"
     EXPONENTIAL = "exponential"
+    POLYWARMUP = "polywarmup"
 
 
 class SchedulerFactory(ABC):
@@ -73,6 +76,63 @@ class ExponentialFactory(SchedulerFactory):
         )
 
 
+class PolyWarmupScheduler(_LRScheduler):
+    """
+    Learning rate scheduler with linear warmup followed by polynomial decay.
+    As described in SegFormer3D paper:
+    - Linear warmup from 4e-6 to 4e-4
+    - PolyLR decay after warmup
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_epochs: int = 50,
+        total_epochs: int = 1000,
+        base_lr: float = 4e-6,
+        final_lr: float = 4e-4,
+        power: float = 0.9,
+        last_epoch: int = -1
+    ):
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.final_lr = final_lr
+        self.power = power
+
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        """Calculate learning rate for current epoch."""
+        if not self._get_lr_called_within_step:
+            warnings.warn("To get the last learning rate computed by the scheduler, "
+                          "please use `get_last_lr()`.", UserWarning)
+
+        if self.last_epoch <= self.warmup_epochs:
+            # Linear warmup: from base_lr to final_lr
+            progress = self.last_epoch / self.warmup_epochs
+            lr = self.base_lr + (self.final_lr - self.base_lr) * progress
+        else:
+            # Polynomial decay after warmup
+            progress = (self.last_epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            decay = (1 - progress) ** self.power
+            lr = self.final_lr * decay
+
+        return [lr for _ in self.optimizer.param_groups]
+
+
+class PolyWarmupFactory(SchedulerFactory):
+    def createScheduler(self, optimizer, config: Config):
+        return PolyWarmupScheduler(
+            optimizer,
+            warmup_epochs=config["POLY_WARMUP_EPOCHS"],
+            total_epochs=config["EPOCHS"],
+            base_lr=config["BASE_LR"],
+            final_lr=config["FINAL_LR"],
+            power=config["POLY_POWER"]
+        )
+
+
 class SchedulerCreator:
     """Factory manager that creates schedulers based on type."""
 
@@ -81,7 +141,8 @@ class SchedulerCreator:
         SchedulerType.ONECYCLE: OneCycleFactory(),
         SchedulerType.COSINE: CosineFactory(),
         SchedulerType.STEP: StepFactory(),
-        SchedulerType.EXPONENTIAL: ExponentialFactory()
+        SchedulerType.EXPONENTIAL: ExponentialFactory(),
+        SchedulerType.POLYWARMUP: PolyWarmupFactory()
     }
 
     @classmethod

@@ -143,6 +143,7 @@ class ConfigCategory(Enum):
 class DataType(Enum):
     """Enum representing different data types."""
     COLORIZATION = "colorization"
+    STANDARD = "standard"
 
 
 class OutputType(Enum):
@@ -157,6 +158,7 @@ class SchedulerType(Enum):
     ONECYCLE = "onecycle"
     COSINE = "cosine"
     STEP = "step"
+    POLYWARMUP = "polywarmup"
 
 
 class LossType(Enum):
@@ -165,6 +167,7 @@ class LossType(Enum):
     PERCEPTUAL = "perceptual"
     COLORFULNESS = "colorfulness"
     VAE = "vae"
+    SEGMENTATION = "segmentation"
 
 
 class ModelType(Enum):
@@ -249,7 +252,8 @@ class DataConfigBuilderFactory:
     def createBuilder(data_type: DataType) -> ConfigBuilder:
         """Create appropriate data builder based on type."""
         builder_mapping = {
-            DataType.COLORIZATION: ColorizationDataConfigBuilder()
+            DataType.COLORIZATION: ColorizationDataConfigBuilder(),
+            DataType.STANDARD: StandardDataConfigBuilder()
         }
 
         return builder_mapping.get(data_type, ColorizationDataConfigBuilder())
@@ -267,6 +271,19 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
             "OUTPUT_CHANNELS": 3,
             "TARGET_CHANNEL": "RGB",
             "TARGET_OUTPUT_CHANNELS": 3
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.DATA
+
+
+class StandardDataConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "DATA_TYPE": "standard",
+            "BATCH_SIZE": 1,
+            "DATA_PATH": "./data",
+            "RESIZE": (32, 128, 128)
         }
 
     def getCategory(self) -> ConfigCategory:
@@ -391,7 +408,8 @@ class SchedulerConfigBuilderFactory:
             SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsConfigBuilder(),
             SchedulerType.ONECYCLE: OneCycleSchedulerConfigBuilder(),
             SchedulerType.COSINE: CosineSchedulerConfigBuilder(),
-            SchedulerType.STEP: StepSchedulerConfigBuilder()
+            SchedulerType.STEP: StepSchedulerConfigBuilder(),
+            SchedulerType.POLYWARMUP: PolyWarmupSchedulerConfigBuilder()
         }
 
         return builder_mapping.get(scheduler_type, ExponentialSchedulerConfigBuilder())
@@ -459,6 +477,20 @@ class StepSchedulerConfigBuilder(ConfigBuilder):
         return ConfigCategory.SCHEDULER
 
 
+class PolyWarmupSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "polywarmup",
+            "POLY_WARMUP_EPOCHS": 50,
+            "BASE_LR": 4e-6,
+            "FINAL_LR": 4e-4,
+            "POLY_POWER": 0.9
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
 class LossConfigBuilderFactory:
     """Factory for creating loss-specific configuration builders."""
 
@@ -469,7 +501,8 @@ class LossConfigBuilderFactory:
             LossType.RECONSTRUCTION: ReconstructionLossConfigBuilder(),
             LossType.PERCEPTUAL: PerceptualLossConfigBuilder(),
             LossType.COLORFULNESS: ColorfulnessLossConfigBuilder(),
-            LossType.VAE: VAELossConfigBuilder()
+            LossType.VAE: VAELossConfigBuilder(),
+            LossType.SEGMENTATION: SegmentationLossConfigBuilder()
         }
 
         return builder_mapping.get(loss_type, ReconstructionLossConfigBuilder())
@@ -512,6 +545,17 @@ class VAELossConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "KL_BETA": 0.01
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.LOSS
+
+
+class SegmentationLossConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "DICE_WEIGHT": 0.5,
+            "CE_WEIGHT": 0.5
         }
 
     def getCategory(self) -> ConfigCategory:

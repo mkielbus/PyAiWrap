@@ -2,6 +2,9 @@ from typing import Dict, Tuple
 import torch.nn as nn
 import torch
 from .visualize import visualizeReconstruction
+import os
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 class GeneratorControlFunc:
@@ -230,3 +233,187 @@ class GANControlFunc:
             num_images=8,
             target_channel=self.target_channel
         )
+
+
+class SegmentationControlFunc:
+    """
+    Callable class for visualizing segmentation results during training.
+    """
+
+    def __init__(self, num_classes: int = 4):
+        """
+        Initialize the segmentation control function.
+
+        Args:
+            num_classes: Number of segmentation classes
+        """
+        self.num_classes = num_classes
+        # Subtle colors for ACL classes only (background remains unchanged)
+        self.class_colors = {
+            1: [0.2, 0.8, 0.2],  # Healthy - subtle green
+            2: [0.9, 0.9, 0.2],  # Partial injury - subtle yellow
+            3: [0.9, 0.3, 0.3]   # Complete rupture - subtle red
+        }
+
+    def __call__(
+        self,
+        models: Dict[str, nn.Module],
+        train_batch: Tuple,
+        val_batch: Tuple,
+        epoch: int,
+        diagrams_path: str,
+        hyperparams_id: str,
+        model_type: str,
+        launch_number: int
+    ) -> None:
+        """
+        Control function for visualizing segmentation during training.
+
+        Args:
+            models: Dictionary containing the segmentation model
+            train_batch: Batch from training data (volumes, seg_masks)
+            val_batch: Batch from validation data (volumes, seg_masks)
+            epoch: Current epoch number
+            diagrams_path: Path to save visualizations
+            hyperparams_id: Hyperparameter configuration ID
+            model_type: Type of model (for naming files)
+            launch_number: Launch number for this training run
+        """
+        seg_model = models['segformer']
+        seg_model.eval()
+
+        train_volumes, train_masks = train_batch[0], train_batch[1]
+        val_volumes, val_masks = val_batch[0], val_batch[1]
+
+        with torch.no_grad():
+            train_preds = seg_model(train_volumes)
+            val_preds = seg_model(val_volumes)
+
+        self.visualizeSegmentation(
+            volumes=train_volumes,
+            true_masks=train_masks,
+            pred_logits=train_preds,
+            epoch=epoch,
+            save_path=diagrams_path,
+            phase="train",
+            hyperparams_id=hyperparams_id,
+            model_type=model_type,
+            launch_number=launch_number
+        )
+
+        self.visualizeSegmentation(
+            volumes=val_volumes,
+            true_masks=val_masks,
+            pred_logits=val_preds,
+            epoch=epoch,
+            save_path=diagrams_path,
+            phase="val",
+            hyperparams_id=hyperparams_id,
+            model_type=model_type,
+            launch_number=launch_number
+        )
+
+    def visualizeSegmentation(
+        self,
+        volumes: torch.Tensor,
+        true_masks: torch.Tensor,
+        pred_logits: torch.Tensor,
+        epoch: int,
+        save_path: str,
+        phase: str,
+        hyperparams_id: str,
+        model_type: str,
+        launch_number: int
+    ) -> None:
+        """
+        Visualize segmentation results with ground truth and predictions.
+
+        Args:
+            volumes: Input volumes [B, 1, D, H, W]
+            true_masks: Ground truth masks [B, D, H, W]
+            pred_logits: Model predictions [B, C, D, H, W]
+            epoch: Current epoch
+            save_path: Path to save images
+            phase: 'train' or 'val'
+            hyperparams_id: Hyperparameter ID
+            model_type: Model type
+            launch_number: Launch number
+        """
+        os.makedirs(save_path, exist_ok=True)
+
+        # Get center slices and convert to numpy
+        batch_size = min(4, volumes.shape[0])
+        volumes_np = volumes.cpu().numpy()
+        true_masks_np = true_masks.cpu().numpy()
+
+        pred_masks_np = torch.softmax(pred_logits, dim=1).argmax(dim=1).cpu().numpy()
+
+        fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
+        if batch_size == 1:
+            axes = axes.reshape(2, 1)
+
+        for i in range(batch_size):
+            # Get center slice
+            depth = volumes_np[i, 0].shape[0]
+            center_slice = depth // 2
+
+            input_slice = volumes_np[i, 0, center_slice]
+
+            true_mask_slice = true_masks_np[i, center_slice]
+
+            pred_mask_slice = pred_masks_np[i, center_slice]
+
+            true_colored = self.maskToColor(input_slice, true_mask_slice)
+            pred_colored = self.maskToColor(input_slice, pred_mask_slice)
+
+            axes[0, i].imshow(true_colored)
+            axes[0, i].set_title(f'GT Sample {i+1}')
+            axes[0, i].axis('off')
+
+            axes[1, i].imshow(pred_colored)
+            axes[1, i].set_title(f'Pred Sample {i+1}')
+            axes[1, i].axis('off')
+
+        legend_elements = [
+            plt.Rectangle((0, 0), 1, 1, facecolor='gray', label='Background'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=[0.2, 0.8, 0.2], label='Healthy'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.9, 0.2], label='Partial'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.3, 0.3], label='Complete')
+        ]
+        fig.legend(handles=legend_elements, loc='lower center', ncol=4,
+                   bbox_to_anchor=(0.5, -0.05))
+
+        plt.suptitle(f'Epoch {epoch} - {phase.upper()} - Segmentation Results')
+        plt.tight_layout()
+
+        filename = f"{model_type}_{phase}_segmentation_epoch_{epoch}_hyperparams_{hyperparams_id}_{launch_number}.png"
+        filepath = os.path.join(save_path, filename)
+        plt.savefig(filepath, bbox_inches='tight', dpi=150)
+        plt.close()
+
+        print(f"Saved segmentation visualization: {filepath}")
+
+    def maskToColor(self, input_slice: np.ndarray, mask_slice: np.ndarray) -> np.ndarray:
+        """
+        Convert mask to colored overlay on input image.
+
+        Args:
+            input_slice: Grayscale input slice [H, W]
+            mask_slice: Segmentation mask slice [H, W]
+
+        Returns:
+            Colored RGB image [H, W, 3]
+        """
+        input_normalized = (input_slice - input_slice.min()) / (input_slice.max() - input_slice.min() + 1e-8)
+
+        colored = np.stack([input_normalized] * 3, axis=-1)
+
+        for class_id, color in self.class_colors.items():
+            mask = mask_slice == class_id
+            if mask.any():
+                for channel in range(3):
+                    colored_channel = colored[..., channel]
+                    colored_channel[mask] = color[channel] * 0.2 + colored_channel[mask] * 0.8
+                    colored[..., channel] = colored_channel
+
+        return np.clip(colored, 0, 1)

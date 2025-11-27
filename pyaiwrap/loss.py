@@ -5,6 +5,7 @@ import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
 from .transforms import labToRgb, labToRgbForVisualization
+from monai.losses import DiceCELoss
 
 
 class LPIPSLoss(nn.Module):
@@ -611,3 +612,54 @@ class GeneratorColorizationLoss:
         # RGB in [0,1] range
         luminance = 0.299 * rgb_images[:, 0:1] + 0.587 * rgb_images[:, 1:2] + 0.114 * rgb_images[:, 2:3]
         return luminance
+
+
+class SegmentationDiceCELoss:
+    """
+    Dice + Cross Entropy Loss from monai
+    """
+    def __init__(
+        self,
+        dice_weight: float = 0.5,
+        ce_weight: float = 0.5
+    ):
+        self.dice_weight = dice_weight
+        self.ce_weight = ce_weight
+
+        self.loss_fn = DiceCELoss(
+            to_onehot_y=True,      # Class indices to one-hot
+            softmax=True,          # Softmax for multi-class
+            lambda_dice=dice_weight,
+            lambda_ce=ce_weight
+        )
+
+    def __call__(
+        self,
+        models: Dict[str, nn.Module],
+        batch: Tuple,
+        metrics: Metrics,
+        gradient_clip: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculate Dice + CE loss
+        """
+        model = models['segformer']
+        input_volumes, seg_labels = batch[0], batch[1]
+
+        # [B, C, D, H, W]
+        seg_logits = model(input_volumes)
+
+        total_loss = self.loss_fn(seg_logits, seg_labels)
+
+        if torch.is_grad_enabled():
+            total_loss.backward()
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip)
+
+        metrics.accumulate({
+            'total_loss': total_loss.item(),
+        })
+
+        return {
+            'loss': total_loss,
+        }
