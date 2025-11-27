@@ -1845,10 +1845,13 @@ class SegFormerDecoderHead3D(nn.Module):
 
         _c1 = self.linear_c1(c1).permute(0, 2, 1).reshape(n, -1, c1.shape[2], c1.shape[3], c1.shape[4]).contiguous()
 
+        print(f"After interpolation - _c1: {_c1.shape}, _c2: {_c2.shape}, _c3: {_c3.shape}, _c4: {_c4.shape}")
         _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))  # [B, decoder_head_embedding_dim, D, H, W]
         x = self.dropout(_c)
         x = self.linear_pred(x)  # [B, num_classes, D, H, W]
+        print(f"Before upsampling: {x.shape}")
         x = self.upsample_volume(x)
+        print(f"After upsampling: {x.shape}")
         return x
 
 
