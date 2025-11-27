@@ -1534,9 +1534,9 @@ class PatchEmbedding3D(nn.Module):
         self.stride = stride
 
     def forward(self, x):
-        patches = self.patch_embeddings(x)  # [B, embed_dim, D, H, W]
+        patches = self.patch_embeddings(x)
         B, C, D, H, W = patches.shape
-        patches = patches.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
+        patches = patches.flatten(2).transpose(1, 2)
         patches = self.norm(patches)
         return patches, (D, H, W)
 
@@ -1547,13 +1547,13 @@ class DWConv3D(nn.Module):
         self.dwconv = nn.Conv3d(dim, dim, 3, 1, 1, bias=True, groups=dim)
         self.bn = nn.BatchNorm3d(dim)
 
-    def forward(self, x):
+    def forward(self, x, spatial_dims):
         B, N, C = x.shape
-        n = cubeRoot(N)
-        x = x.transpose(1, 2).view(B, C, n, n, n)  # [B, C, D, H, W]
+        D, H, W = spatial_dims
+        x = x.transpose(1, 2).view(B, C, D, H, W)
         x = self.dwconv(x)
         x = self.bn(x)
-        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, C]
+        x = x.flatten(2).transpose(1, 2)
         return x
 
 
@@ -1567,9 +1567,9 @@ class MLP3D(nn.Module):
         self.act_fn = nn.GELU()
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, spatial_dims):
         x = self.fc1(x)
-        x = self.dwconv(x)
+        x = self.dwconv(x, spatial_dims)
         x = self.act_fn(x)
         x = self.dropout(x)
         x = self.fc2(x)
@@ -1586,7 +1586,7 @@ class SegFormerAttention(nn.Module):
         attn_dropout: float = 0.0
     ):
         super().__init__()
-        assert embed_dim % num_heads == 0, "Embedding dim should be divisible by number of heads!"
+        assert embed_dim % num_heads == 0
 
         self.num_heads = num_heads
         self.attention_head_dim = embed_dim // num_heads
@@ -1606,15 +1606,15 @@ class SegFormerAttention(nn.Module):
             self.sr = nn.Conv3d(embed_dim, embed_dim, kernel_size=sr_ratio, stride=sr_ratio)
             self.sr_norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x):
-        B, N, C = x.shape  # [B, num_patches, embed_dim]
+    def forward(self, x, spatial_dims):
+        B, N, C = x.shape
+        D, H, W = spatial_dims
 
         q = x
         if self.sr_ratio > 1:
-            n = cubeRoot(N)
-            x_ = x.permute(0, 2, 1).reshape(B, C, n, n, n)  # [B, C, D, H, W]
-            x_ = self.sr(x_)  # [B, C, D/sr, H/sr, W/sr]
-            x_ = x_.reshape(B, C, -1).permute(0, 2, 1)  # [B, num_patches_reduced, C]
+            x_ = x.permute(0, 2, 1).reshape(B, C, D, H, W)
+            x_ = self.sr(x_)
+            x_ = x_.reshape(B, C, -1).permute(0, 2, 1)
             x_ = self.sr_norm(x_)
             k = v = x_
         else:
@@ -1651,9 +1651,9 @@ class SegFormerBlock3D(nn.Module):
             dropout=proj_dropout
         )
 
-    def forward(self, x):
-        x = x + self.attention(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+    def forward(self, x, spatial_dims):
+        x = x + self.attention(self.norm1(x), spatial_dims)
+        x = x + self.mlp(self.norm2(x), spatial_dims)
         return x
 
 
@@ -1726,8 +1726,7 @@ class MixVisionTransformer3D(nn.Module):
                 embed_dim=embed_dims[2],
                 num_heads=num_heads[2],
                 mlp_ratio=mlp_ratios[2],
-                sr_ratio=sr_ratios[2],
-                qkv_bias=True,
+                sr_ratio=sr_ratios[2]
             ) for _ in range(depths[2])
         ])
         self.norm3 = nn.LayerNorm(embed_dims[2])
@@ -1737,8 +1736,7 @@ class MixVisionTransformer3D(nn.Module):
                 embed_dim=embed_dims[3],
                 num_heads=num_heads[3],
                 mlp_ratio=mlp_ratios[3],
-                sr_ratio=sr_ratios[3],
-                qkv_bias=True,
+                sr_ratio=sr_ratios[3]
             ) for _ in range(depths[3])
         ])
         self.norm4 = nn.LayerNorm(embed_dims[3])
@@ -1750,7 +1748,7 @@ class MixVisionTransformer3D(nn.Module):
         B, N, C = x.shape
         D1, H1, W1 = spatial_dims1
         for blk in self.tf_block1:
-            x = blk(x)
+            x = blk(x, (D1, H1, W1))
         x = self.norm1(x)
         x = x.reshape(B, D1, H1, W1, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
@@ -1759,7 +1757,7 @@ class MixVisionTransformer3D(nn.Module):
         B, N, C = x.shape
         D2, H2, W2 = spatial_dims2
         for blk in self.tf_block2:
-            x = blk(x)
+            x = blk(x, (D2, H2, W2))
         x = self.norm2(x)
         x = x.reshape(B, D2, H2, W2, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
@@ -1768,7 +1766,7 @@ class MixVisionTransformer3D(nn.Module):
         B, N, C = x.shape
         D3, H3, W3 = spatial_dims3
         for blk in self.tf_block3:
-            x = blk(x)
+            x = blk(x, (D3, H3, W3))
         x = self.norm3(x)
         x = x.reshape(B, D3, H3, W3, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
@@ -1777,7 +1775,7 @@ class MixVisionTransformer3D(nn.Module):
         B, N, C = x.shape
         D4, H4, W4 = spatial_dims4
         for blk in self.tf_block4:
-            x = blk(x)
+            x = blk(x, (D4, H4, W4))
         x = self.norm4(x)
         x = x.reshape(B, D4, H4, W4, -1).permute(0, 4, 1, 2, 3).contiguous()
         outputs.append(x)
@@ -1792,7 +1790,7 @@ class MLP3DDecoder(nn.Module):
         self.bn = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        x = x.flatten(2).transpose(1, 2).contiguous()  # [B, C, D, H, W] -> [B, num_patches, embed_dim]
+        x = x.flatten(2).transpose(1, 2).contiguous()
         x = self.proj(x)
         x = self.bn(x)
         return x
@@ -1844,11 +1842,6 @@ class SegFormerDecoderHead3D(nn.Module):
         x = self.dropout(_c)
         x = self.linear_pred(x)
 
-        # Upsample to the original input size
         x = F.interpolate(x, size=input_size, mode="trilinear", align_corners=False)
 
         return x
-
-
-def cubeRoot(n):
-    return round(math.pow(n, (1 / 3)))
