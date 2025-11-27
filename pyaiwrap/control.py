@@ -330,7 +330,7 @@ class SegmentationControlFunc:
 
         Args:
             volumes: Input volumes [B, 1, D, H, W]
-            true_masks: Ground truth masks [B, D, H, W]
+            true_masks: Ground truth masks [B, 1, D, H, W]
             pred_logits: Model predictions [B, C, D, H, W]
             epoch: Current epoch
             save_path: Path to save images
@@ -346,6 +346,10 @@ class SegmentationControlFunc:
         volumes_np = volumes.cpu().numpy()
         true_masks_np = true_masks.cpu().numpy()
 
+        # Remove channel dimension from true masks for visualization
+        if true_masks_np.ndim == 5:  # [B, 1, D, H, W]
+            true_masks_np = true_masks_np[:, 0]  # [B, D, H, W]
+
         pred_masks_np = torch.softmax(pred_logits, dim=1).argmax(dim=1).cpu().numpy()
 
         fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
@@ -353,12 +357,10 @@ class SegmentationControlFunc:
             axes = axes.reshape(2, 1)
 
         for i in range(batch_size):
-            # Get center slice
             depth = volumes_np[i, 0].shape[0]
             center_slice = depth // 2
 
             input_slice = volumes_np[i, 0, center_slice]
-
             true_mask_slice = true_masks_np[i, center_slice]
 
             pred_mask_slice = pred_masks_np[i, center_slice]
@@ -377,8 +379,8 @@ class SegmentationControlFunc:
         legend_elements = [
             plt.Rectangle((0, 0), 1, 1, facecolor='gray', label='Background'),
             plt.Rectangle((0, 0), 1, 1, facecolor=[0.2, 0.8, 0.2], label='Healthy'),
-            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.9, 0.2], label='Partial'),
-            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.3, 0.3], label='Complete')
+            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.9, 0.2], label='Partially injured'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.3, 0.3], label='Completely ruptured')
         ]
         fig.legend(handles=legend_elements, loc='lower center', ncol=4,
                    bbox_to_anchor=(0.5, -0.05))
@@ -390,8 +392,6 @@ class SegmentationControlFunc:
         filepath = os.path.join(save_path, filename)
         plt.savefig(filepath, bbox_inches='tight', dpi=150)
         plt.close()
-
-        print(f"Saved segmentation visualization: {filepath}")
 
     def maskToColor(self, input_slice: np.ndarray, mask_slice: np.ndarray) -> np.ndarray:
         """
@@ -413,7 +413,7 @@ class SegmentationControlFunc:
             if mask.any():
                 for channel in range(3):
                     colored_channel = colored[..., channel]
-                    colored_channel[mask] = color[channel] * 0.2 + colored_channel[mask] * 0.8
+                    colored_channel[mask] = color[channel] * 0.3 + colored_channel[mask] * 0.7
                     colored[..., channel] = colored_channel
 
         return np.clip(colored, 0, 1)

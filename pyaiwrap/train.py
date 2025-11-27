@@ -195,6 +195,9 @@ def train(
         if best_val_metric is None or val_metric < best_val_metric:
             best_val_metric = val_metric
             current_patience = 0
+            for model_name, model in models.items():
+                model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
+                torch.save(model.state_dict(), model_path)
         else:
             current_patience += 1
 

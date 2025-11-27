@@ -153,8 +153,8 @@ class KneeMRISegmentationDataset(Dataset):
 
         # [1, D, H, W]
         volume_tensor = torch.tensor(volume, dtype=torch.float32).unsqueeze(0)
-        # [D, H, W]
-        seg_mask_tensor = torch.tensor(seg_mask, dtype=torch.long)
+        # [1, D, H, W]
+        seg_mask_tensor = torch.tensor(seg_mask, dtype=torch.long).unsqueeze(0)
 
         return volume_tensor, seg_mask_tensor
 
