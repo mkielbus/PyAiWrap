@@ -1507,9 +1507,10 @@ class SegFormer3D(nn.Module):
                 module.bias.data.zero_()
 
     def forward(self, x):
+        original_size = x.shape[2:]
         features = self.segformer_encoder(x)
         c1, c2, c3, c4 = features
-        output = self.segformer_decoder(c1, c2, c3, c4)
+        output = self.segformer_decoder(c1, c2, c3, c4, original_size)
         return output
 
 
@@ -1631,7 +1632,6 @@ class SegFormerBlock3D(nn.Module):
         mlp_ratio: int = 2,
         num_heads: int = 8,
         sr_ratio: int = 2,
-        qkv_bias: bool = False,
         attn_dropout: float = 0.0,
         proj_dropout: float = 0.0,
     ):
@@ -1826,7 +1826,7 @@ class SegFormerDecoderHead3D(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.linear_pred = nn.Conv3d(decoder_head_embedding_dim, num_classes, kernel_size=1)
 
-    def forward(self, c1, c2, c3, c4):
+    def forward(self, c1, c2, c3, c4, input_size):
         n = c4.shape[0]
 
         _c4 = self.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3], c4.shape[4]).contiguous()
@@ -1843,10 +1843,9 @@ class SegFormerDecoderHead3D(nn.Module):
         _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
         x = self.dropout(_c)
         x = self.linear_pred(x)
-        
-        # Upsample to match your target size (32, 256, 256)
-        target_size = (32, 256, 256)
-        x = F.interpolate(x, size=target_size, mode="trilinear", align_corners=False)
+
+        # Upsample to the original input size
+        x = F.interpolate(x, size=input_size, mode="trilinear", align_corners=False)
 
         return x
 
