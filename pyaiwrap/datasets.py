@@ -145,16 +145,15 @@ class KneeMRISegmentationDataset(Dataset):
 
         seg_mask = self.createSegmentationMask(volume.shape, row)
 
-        # Resize both volume and mask together if target_size is specified
         if self.target_size:
             volume, seg_mask = self.resizeVolumeAndMask(volume, seg_mask, self.target_size)
 
         volume = self.preprocessVolume(volume)
 
         # [1, D, H, W]
-        volume_tensor = torch.tensor(volume, dtype=torch.float32).unsqueeze(0)
+        volume_tensor = torch.from_numpy(volume.copy()).float().unsqueeze(0)
         # [1, D, H, W]
-        seg_mask_tensor = torch.tensor(seg_mask, dtype=torch.long).unsqueeze(0)
+        seg_mask_tensor = torch.from_numpy(seg_mask.copy()).long().unsqueeze(0)
 
         return volume_tensor, seg_mask_tensor
 
