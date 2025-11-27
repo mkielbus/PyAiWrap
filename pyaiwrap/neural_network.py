@@ -1642,9 +1642,7 @@ class SegFormerBlock3D(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             sr_ratio=sr_ratio,
-            qkv_bias=qkv_bias,
-            attn_dropout=attn_dropout,
-            proj_dropout=proj_dropout
+            attn_dropout=attn_dropout
         )
         self.norm2 = nn.LayerNorm(embed_dim)
         self.mlp = MLP3D(
@@ -1708,8 +1706,7 @@ class MixVisionTransformer3D(nn.Module):
                 embed_dim=embed_dims[0],
                 num_heads=num_heads[0],
                 mlp_ratio=mlp_ratios[0],
-                sr_ratio=sr_ratios[0],
-                qkv_bias=True,
+                sr_ratio=sr_ratios[0]
             ) for _ in range(depths[0])
         ])
         self.norm1 = nn.LayerNorm(embed_dims[0])
@@ -1719,8 +1716,7 @@ class MixVisionTransformer3D(nn.Module):
                 embed_dim=embed_dims[1],
                 num_heads=num_heads[1],
                 mlp_ratio=mlp_ratios[1],
-                sr_ratio=sr_ratios[1],
-                qkv_bias=True,
+                sr_ratio=sr_ratios[1]
             ) for _ in range(depths[1])
         ])
         self.norm2 = nn.LayerNorm(embed_dims[1])
