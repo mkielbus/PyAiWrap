@@ -236,23 +236,12 @@ class GANControlFunc:
 
 
 class SegmentationControlFunc:
-    """
-    Callable class for visualizing segmentation results during training.
-    """
-
     def __init__(self, num_classes: int = 4):
-        """
-        Initialize the segmentation control function.
-
-        Args:
-            num_classes: Number of segmentation classes
-        """
         self.num_classes = num_classes
-        # Subtle colors for ACL classes only (background remains unchanged)
         self.class_colors = {
-            1: [0.2, 0.8, 0.2],  # Healthy - subtle green
-            2: [0.9, 0.9, 0.2],  # Partial injury - subtle yellow
-            3: [0.9, 0.3, 0.3]   # Complete rupture - subtle red
+            1: [0.2, 0.8, 0.2],
+            2: [0.9, 0.9, 0.2],
+            3: [0.9, 0.3, 0.3]
         }
 
     def __call__(
@@ -266,19 +255,6 @@ class SegmentationControlFunc:
         model_type: str,
         launch_number: int
     ) -> None:
-        """
-        Control function for visualizing segmentation during training.
-
-        Args:
-            models: Dictionary containing the segmentation model
-            train_batch: Batch from training data (volumes, seg_masks)
-            val_batch: Batch from validation data (volumes, seg_masks)
-            epoch: Current epoch number
-            diagrams_path: Path to save visualizations
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (for naming files)
-            launch_number: Launch number for this training run
-        """
         seg_model = models['segformer']
         seg_model.eval()
 
@@ -313,6 +289,15 @@ class SegmentationControlFunc:
             launch_number=launch_number
         )
 
+    def findMaskCenterSlice(self, mask_volume: np.ndarray) -> int:
+        z_coords, y_coords, x_coords = np.where(mask_volume > 0)
+
+        if len(z_coords) == 0:
+            return mask_volume.shape[0] // 2
+
+        centroid_z = int(np.mean(z_coords))
+        return centroid_z
+
     def visualizeSegmentation(
         self,
         volumes: torch.Tensor,
@@ -325,30 +310,14 @@ class SegmentationControlFunc:
         model_type: str,
         launch_number: int
     ) -> None:
-        """
-        Visualize segmentation results with ground truth and predictions.
-
-        Args:
-            volumes: Input volumes [B, 1, D, H, W]
-            true_masks: Ground truth masks [B, 1, D, H, W]
-            pred_logits: Model predictions [B, C, D, H, W]
-            epoch: Current epoch
-            save_path: Path to save images
-            phase: 'train' or 'val'
-            hyperparams_id: Hyperparameter ID
-            model_type: Model type
-            launch_number: Launch number
-        """
         os.makedirs(save_path, exist_ok=True)
 
-        # Get center slices and convert to numpy
         batch_size = min(4, volumes.shape[0])
         volumes_np = volumes.cpu().numpy()
         true_masks_np = true_masks.cpu().numpy()
 
-        # Remove channel dimension from true masks for visualization
-        if true_masks_np.ndim == 5:  # [B, 1, D, H, W]
-            true_masks_np = true_masks_np[:, 0]  # [B, D, H, W]
+        if true_masks_np.ndim == 5:
+            true_masks_np = true_masks_np[:, 0]
 
         pred_masks_np = torch.softmax(pred_logits, dim=1).argmax(dim=1).cpu().numpy()
 
@@ -357,13 +326,11 @@ class SegmentationControlFunc:
             axes = axes.reshape(2, 1)
 
         for i in range(batch_size):
-            depth = volumes_np[i, 0].shape[0]
-            center_slice = depth // 2
+            slice_idx = self.findMaskCenterSlice(true_masks_np[i])
 
-            input_slice = volumes_np[i, 0, center_slice]
-            true_mask_slice = true_masks_np[i, center_slice]
-
-            pred_mask_slice = pred_masks_np[i, center_slice]
+            input_slice = volumes_np[i, 0, slice_idx]
+            true_mask_slice = true_masks_np[i, slice_idx]
+            pred_mask_slice = pred_masks_np[i, slice_idx]
 
             true_colored = self.maskToColor(input_slice, true_mask_slice)
             pred_colored = self.maskToColor(input_slice, pred_mask_slice)
@@ -394,16 +361,6 @@ class SegmentationControlFunc:
         plt.close()
 
     def maskToColor(self, input_slice: np.ndarray, mask_slice: np.ndarray) -> np.ndarray:
-        """
-        Convert mask to colored overlay on input image.
-
-        Args:
-            input_slice: Grayscale input slice [H, W]
-            mask_slice: Segmentation mask slice [H, W]
-
-        Returns:
-            Colored RGB image [H, W, 3]
-        """
         input_normalized = (input_slice - input_slice.min()) / (input_slice.max() - input_slice.min() + 1e-8)
 
         colored = np.stack([input_normalized] * 3, axis=-1)
