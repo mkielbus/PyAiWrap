@@ -660,6 +660,7 @@ class ColorizationTransformerNet(nn.Module):
 
         return output
 
+
 class NeuralNetworkLayer(nn.Module):
     """
     A wrapper around a single torch.nn layer.
@@ -947,12 +948,12 @@ class PixelDecoder(nn.Module):
 
             b, c_up, h_up, w_up = upsampled_features.shape
 
-            output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, c_up]
+            output_features = upsampled_features.view(b, c_up, -1).transpose(1, 2)  # [batch_size, h_up*w_up, out_channels]
 
             feature_embed = self.feature_embeddings[i].weight.unsqueeze(0)  # [1, 1, out_channels]
             feature_embed = feature_embed.expand(batch_size, output_features.size(1), -1)  # [batch_size, h_up*w_up, out_channels]
 
-            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, c_up]
+            output_features_with_embed = output_features + feature_embed  # [batch_size, h_up*w_up, out_channels]
 
             output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
 
@@ -960,19 +961,21 @@ class PixelDecoder(nn.Module):
             output_features_projected_with_pos = output_features_projected + pos_encoding  # [batch_size, h_up*w_up, embed_dim]
             pixel_decoder_outputs.append(output_features_projected_with_pos)
 
-            current_features = output_features_with_embed  # [batch_size, h_up*w_up, c_up]
+            current_features = output_features_with_embed  # [batch_size, h_up*w_up, out_channels]
 
         b, n_patches, c_final = current_features.shape
         h_final = h_enc * (2 ** self.num_layers)
         w_final = w_enc * (2 ** self.num_layers)
-        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, embed_dim, h_final, w_final]
+        final_pixel_spatial = current_features.transpose(1, 2).view(b, c_final, h_final, w_final)  # [batch_size, c_final, h_final, w_final]
 
         return pixel_decoder_outputs, final_pixel_spatial
 
 
 class MultiScaleColorDecoder(nn.Module):
     def __init__(self,
+                 color_dim: int = 256,
                  embed_dim: int = 512,
+                 output_dim: int = 256,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
@@ -984,17 +987,17 @@ class MultiScaleColorDecoder(nn.Module):
         self.memory_size = memory_size
         self.num_layers = num_layers
 
-        self.color_embeddings = nn.Embedding(memory_size, embed_dim)
+        self.color_embeddings = nn.Embedding(memory_size, color_dim)
         nn.init.zeros_(self.color_embeddings.weight)
 
-        self.memory_embeddings = nn.Embedding(memory_size, embed_dim)
+        self.memory_embeddings = nn.Embedding(memory_size, color_dim)
         nn.init.zeros_(self.memory_embeddings.weight)
 
         self.decoder_blocks = nn.ModuleList()
         for i in range(num_layers):
             decoder_block = nn.ModuleDict({
                 'cross_attention': MultiHeadAttention(
-                    query_dim=embed_dim,
+                    query_dim=color_dim,
                     key_dim=embed_dim,
                     value_dim=embed_dim,
                     embed_dim=embed_dim,
@@ -1004,7 +1007,7 @@ class MultiScaleColorDecoder(nn.Module):
                 ),
                 'norm1': nn.LayerNorm(embed_dim),
                 'self_attention': MultiHeadAttention(
-                    query_dim=embed_dim,
+                    query_dim=color_dim,
                     key_dim=None,
                     value_dim=None,
                     embed_dim=embed_dim,
@@ -1023,13 +1026,14 @@ class MultiScaleColorDecoder(nn.Module):
                 'norm3': nn.LayerNorm(embed_dim)
             })
             self.decoder_blocks.append(decoder_block)
+        self._final_projection = nn.Linear(embed_dim, output_dim)
 
     def forward(self, pixel_decoder_outputs: List[torch.Tensor]) -> torch.Tensor:
         batch_size = pixel_decoder_outputs[0].shape[0]
 
-        color_queries = self.color_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        color_queries = self.color_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, color_dim]
 
-        memory = self.memory_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, embed_dim]
+        memory = self.memory_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, memory_size, color_dim]
 
         color_decoder_output = color_queries
 
@@ -1037,31 +1041,33 @@ class MultiScaleColorDecoder(nn.Module):
             pixel_features_idx = i % len(pixel_decoder_outputs)
             pixel_features = pixel_decoder_outputs[pixel_features_idx]  # [batch_size, num_patches, embed_dim]
 
-            queries_with_pos = color_decoder_output + memory  # [batch_size, memory_size, embed_dim]
+            queries_with_pos = color_decoder_output + memory  # [batch_size, memory_size, color_dim]
 
             cross_attn_out = block['cross_attention'](
                 query=queries_with_pos,
                 key=pixel_features,
                 value=pixel_features
-            )  # [batch_size, memory_size, embed_dim]
+            )  # [batch_size, memory_size, color_dim]
 
             color_decoder_output = color_decoder_output + cross_attn_out
             color_decoder_output = block['norm1'](color_decoder_output)
 
-            self_attn_out = block['self_attention'](query=color_decoder_output + memory)  # [batch_size, memory_size, embed_dim]
+            self_attn_out = block['self_attention'](query=color_decoder_output + memory)  # [batch_size, memory_size, color_dim]
             color_decoder_output = color_decoder_output + self_attn_out
             color_decoder_output = block['norm2'](color_decoder_output)
 
-            mlp_out = block['mlp'](color_decoder_output)  # [batch_size, memory_size, embed_dim]
+            mlp_out = block['mlp'](color_decoder_output)  # [batch_size, memory_size, color_dim]
             color_decoder_output = color_decoder_output + mlp_out
             color_decoder_output = block['norm3'](color_decoder_output)
 
-        return color_decoder_output  # [batch_size, memory_size, embed_dim]
+        return self._final_projection(color_decoder_output)  # [batch_size, memory_size, color_dim] -> [batch_size, memory_size, output_dim]
 
 
 class ColorMemoryTransformer(nn.Module):
     def __init__(self,
+                 color_dim: int = 256,
                  embed_dim: int = 512,
+                 color_decoder_output_dim: int = 256,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
@@ -1090,7 +1096,9 @@ class ColorMemoryTransformer(nn.Module):
         self.pixel_decoder_layers = self.pixel_decoder.num_layers
 
         self.color_decoder = MultiScaleColorDecoder(
+            color_dim=color_dim,
             embed_dim=embed_dim,
+            output_dim=color_decoder_output_dim,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
@@ -1415,39 +1423,6 @@ class UNetWithSkipConnections(nn.Module):
             x = layer(x)
 
         return x
-
-
-class DynamicSpatialWeights(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=32):
-        super().__init__()
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-
-        self.weight_predictor = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)  # [B, hidden_channels, H, W]
-        )
-
-        self.conv_in = nn.Conv2d(in_channels, hidden_channels, kernel_size=1)
-        self.conv_out = nn.Conv2d(hidden_channels, in_channels, kernel_size=1)
-
-        self.output_scale = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 0.1)
-
-    def forward(self, x):
-        identity = x
-
-        hidden = self.conv_in(x)  # [B, hidden_channels, H, W]
-
-        spatial_weights = self.weight_predictor(x)  # [B, hidden_channels, H, W]
-
-        weighted_hidden = hidden * spatial_weights
-
-        correction = self.conv_out(weighted_hidden)
-
-        return torch.clamp(identity + correction * self.output_scale, 0, 1)
 
 
 class SegFormer3D(nn.Module):
