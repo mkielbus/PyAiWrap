@@ -159,6 +159,7 @@ class SchedulerType(Enum):
     COSINE = "cosine"
     STEP = "step"
     POLYWARMUP = "polywarmup"
+    MULTI_STEP = "multi_step"
 
 
 class LossType(Enum):
@@ -409,7 +410,8 @@ class SchedulerConfigBuilderFactory:
             SchedulerType.ONECYCLE: OneCycleSchedulerConfigBuilder(),
             SchedulerType.COSINE: CosineSchedulerConfigBuilder(),
             SchedulerType.STEP: StepSchedulerConfigBuilder(),
-            SchedulerType.POLYWARMUP: PolyWarmupSchedulerConfigBuilder()
+            SchedulerType.POLYWARMUP: PolyWarmupSchedulerConfigBuilder(),
+            SchedulerType.MULTI_STEP: MultiStepSchedulerrConfigBuilder()
         }
 
         return builder_mapping.get(scheduler_type, ExponentialSchedulerConfigBuilder())
@@ -485,6 +487,20 @@ class PolyWarmupSchedulerConfigBuilder(ConfigBuilder):
             "BASE_LR": 4e-6,
             "FINAL_LR": 4e-4,
             "POLY_POWER": 0.9
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class MultiStepSchedulerrConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "multi_step",
+            "DECAY_START_ITER": 80000,
+            "DECAY_STEP_ITER": 40000,
+            "DECAY_FACTOR": 0.5,
+            "MAX_ITERS": 400000,
         }
 
     def getCategory(self) -> ConfigCategory:

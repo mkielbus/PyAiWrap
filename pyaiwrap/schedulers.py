@@ -15,6 +15,7 @@ class SchedulerType(Enum):
     STEP = "step"
     EXPONENTIAL = "exponential"
     POLYWARMUP = "polywarmup"
+    MULTI_STEP = "multi_step"
 
 
 class SchedulerFactory(ABC):
@@ -73,6 +74,27 @@ class ExponentialFactory(SchedulerFactory):
         return torch.optim.lr_scheduler.ExponentialLR(
             optimizer,
             gamma=config["GAMMA"]
+        )
+
+
+class MultiStepFactory(SchedulerFactory):
+    """Factory for iteration-based MultiStepLR."""
+    def createScheduler(self, optimizer, config: Config):
+
+        milestone_list = []
+        decay_start = config["DECAY_START_ITER"]
+        decay_step = config["DECAY_STEP_ITER"]
+        max_iters = config["MAX_ITERS"]
+
+        current_iter = decay_start
+        while current_iter < max_iters:
+            milestone_list.append(current_iter)
+            current_iter += decay_step
+
+        return torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=milestone_list,
+            gamma=config["DECAY_FACTOR"]
         )
 
 
@@ -142,7 +164,8 @@ class SchedulerCreator:
         SchedulerType.COSINE: CosineFactory(),
         SchedulerType.STEP: StepFactory(),
         SchedulerType.EXPONENTIAL: ExponentialFactory(),
-        SchedulerType.POLYWARMUP: PolyWarmupFactory()
+        SchedulerType.POLYWARMUP: PolyWarmupFactory(),
+        SchedulerType.MULTI_STEP: MultiStepFactory()
     }
 
     @classmethod
