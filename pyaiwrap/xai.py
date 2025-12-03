@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from datetime import datetime
+from captum.attr import Lime
 
 ActivationDict = Dict[str, torch.Tensor]
 LayerNameList = List[str]
@@ -222,6 +223,109 @@ class SensitivityVisualizer:
         plt.show()
 
 
+class XAIExplanationMethod(ABC):
+    """Base class for XAI explanation methods."""
+
+    @abstractmethod
+    def explain(self,
+                model: nn.Module,
+                input_tensor: torch.Tensor,
+                target: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
+        """Generate explanations for the input."""
+        pass
+
+    @abstractmethod
+    def getName(self) -> str:
+        """Get name of the explanation method."""
+        pass
+
+
+class LIMEExplainer(XAIExplanationMethod):
+    """LIME explanation for medical image segmentation."""
+
+    def __init__(self,
+                 n_samples: int = 100,
+                 kernel_width: float = 1.0,
+                 batch_size: int = 4,
+                 segmentation_mode: bool = True):
+        """
+        Args:
+            n_samples: Number of samples for LIME
+            kernel_width: Kernel width for LIME
+            batch_size: Batch size for processing
+            segmentation_mode: If True, expects 4D/5D inputs (B x C x D x H x W)
+        """
+        self._n_samples = n_samples
+        self._kernel_width = kernel_width
+        self._batch_size = batch_size
+        self._segmentation_mode = segmentation_mode
+
+    def explain(self,
+                model: nn.Module,
+                input_tensor: torch.Tensor,
+                target: Optional[torch.Tensor] = None,
+                class_idx: int = 0,
+                **kwargs) -> torch.Tensor:
+        """Generate LIME explanations."""
+        model.eval()
+
+        if self._segmentation_mode:
+            return self._explainSegmentation(model, input_tensor, class_idx, **kwargs)
+        else:
+            return self._explainClassification(model, input_tensor, target, **kwargs)
+
+    def _explainSegmentation(self,
+                             model: nn.Module,
+                             input_tensor: torch.Tensor,
+                             class_idx: int,
+                             **kwargs) -> torch.Tensor:
+        """Explain segmentation predictions."""
+
+        def forward_func(x: torch.Tensor) -> torch.Tensor:
+            """Forward function that returns logits for specific class."""
+            with torch.no_grad():
+                output = model(x)
+                if output.dim() == 5:  # B x C x D x H x W
+                    return output[:, class_idx:class_idx+1, ...]
+                return output
+
+        lime = Lime(forward_func)
+
+        attr = lime.attribute(
+            input_tensor,
+            n_samples=self._n_samples,
+            perturbations_per_eval=self._batch_size,
+            **kwargs
+        )
+
+        return attr
+
+    def _explainClassification(self,
+                               model: nn.Module,
+                               input_tensor: torch.Tensor,
+                               target: Optional[torch.Tensor] = None,
+                               **kwargs) -> torch.Tensor:
+        if target is None:
+            with torch.no_grad():
+                output = model(input_tensor)
+                target = output.argmax(dim=1)
+
+        lime = Lime(model)
+        attr = lime.attribute(
+            input_tensor,
+            target=target,
+            n_samples=self._n_samples,
+            perturbations_per_eval=self._batch_size,
+            **kwargs
+        )
+
+        return attr
+
+    def getName(self) -> str:
+        return f"LIMEExplainer(n_samples={self._n_samples})"
+
+
 class XAIManager:
     """Main manager for XAI operations."""
 
@@ -229,6 +333,21 @@ class XAIManager:
         """Initialize XAI Manager."""
         self._model = model
         self._extraction_command = PyTorchHookExtractionCommand()
+        self._explainer: Optional[XAIExplanationMethod] = None
+
+    def setExplainer(self, explainer: XAIExplanationMethod):
+        """Set the explanation method to use."""
+        self._explainer = explainer
+
+    def explain(self,
+                input_tensor: torch.Tensor,
+                target: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
+        """Generate explanations for input."""
+        if self._explainer is None:
+            raise ValueError("No explainer set. Use setExplainer() first.")
+
+        return self._explainer.explain(self._model, input_tensor, target, **kwargs)
 
     def gatherActivations(self,
                           dataloader: DataLoader,

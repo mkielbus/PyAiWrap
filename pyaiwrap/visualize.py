@@ -3,6 +3,9 @@ import os
 from torchvision.utils import make_grid, save_image
 from typing import Optional
 from .transforms import labToRgb, labToRgbForVisualization
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Dict, List
 
 
 def convertToRgb(images: torch.Tensor,
@@ -193,3 +196,92 @@ def visualizeReconstruction(originalImages: torch.Tensor,
     saveFile = os.path.join(savePath,
                             f'{modelType}_{launchNumber}_{hyperparamsId}_epoch_{epoch:03d}_{inputChannel}_to_{targetChannel}.png')
     save_image(grid, saveFile)
+
+
+def findMaskCenterSlice(mask_volume: np.ndarray) -> int:
+    z_coords, y_coords, x_coords = np.where(mask_volume > 0)
+
+    if len(z_coords) == 0:
+        return mask_volume.shape[0] // 2
+
+    centroid_z = int(np.mean(z_coords))
+    return centroid_z
+
+
+def visualizeSegmentation(
+    volumes: torch.Tensor,
+    true_masks: torch.Tensor,
+    pred_logits: torch.Tensor,
+    epoch: int,
+    save_path: str,
+    phase: str,
+    hyperparams_id: str,
+    model_type: str,
+    launch_number: int,
+    class_colors: Dict[int:List[float]]
+) -> None:
+    os.makedirs(save_path, exist_ok=True)
+
+    batch_size = min(4, volumes.shape[0])
+    volumes_np = volumes.cpu().numpy()
+    true_masks_np = true_masks.cpu().numpy()
+
+    if true_masks_np.ndim == 5:
+        true_masks_np = true_masks_np[:, 0]
+
+    pred_masks_np = torch.softmax(pred_logits, dim=1).argmax(dim=1).cpu().numpy()
+
+    fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
+    if batch_size == 1:
+        axes = axes.reshape(2, 1)
+
+    for i in range(batch_size):
+        slice_idx = findMaskCenterSlice(true_masks_np[i])
+
+        input_slice = volumes_np[i, 0, slice_idx]
+        true_mask_slice = true_masks_np[i, slice_idx]
+        pred_mask_slice = pred_masks_np[i, slice_idx]
+
+        true_colored = maskToColor(input_slice, true_mask_slice, class_colors)
+        pred_colored = maskToColor(input_slice, pred_mask_slice, class_colors)
+
+        axes[0, i].imshow(true_colored)
+        axes[0, i].set_title(f'GT Sample {i+1}')
+        axes[0, i].axis('off')
+
+        axes[1, i].imshow(pred_colored)
+        axes[1, i].set_title(f'Pred Sample {i+1}')
+        axes[1, i].axis('off')
+
+    legend_elements = [
+        plt.Rectangle((0, 0), 1, 1, facecolor='gray', label='Background'),
+        plt.Rectangle((0, 0), 1, 1, facecolor=[0.2, 0.8, 0.2], label='Healthy'),
+        plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.9, 0.2], label='Partially injured'),
+        plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.3, 0.3], label='Completely ruptured')
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=4,
+               bbox_to_anchor=(0.5, -0.05))
+
+    plt.suptitle(f'Epoch {epoch} - {phase.upper()} - Segmentation Results')
+    plt.tight_layout()
+
+    filename = f"{model_type}_{phase}_segmentation_epoch_{epoch}_hyperparams_{hyperparams_id}_{launch_number}.png"
+    filepath = os.path.join(save_path, filename)
+    plt.savefig(filepath, bbox_inches='tight', dpi=150)
+    plt.close()
+
+
+def maskToColor(input_slice: np.ndarray, mask_slice: np.ndarray, class_colors: Dict[int:List[float]]) -> np.ndarray:
+    input_normalized = (input_slice - input_slice.min()) / (input_slice.max() - input_slice.min() + 1e-8)
+
+    colored = np.stack([input_normalized] * 3, axis=-1)
+
+    for class_id, color in class_colors.items():
+        mask = mask_slice == class_id
+        if mask.any():
+            for channel in range(3):
+                colored_channel = colored[..., channel]
+                colored_channel[mask] = color[channel] * 0.3 + colored_channel[mask] * 0.7
+                colored[..., channel] = colored_channel
+
+    return np.clip(colored, 0, 1)
