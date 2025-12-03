@@ -218,7 +218,7 @@ def visualizeSegmentation(
     hyperparams_id: str,
     model_type: str,
     launch_number: int,
-    class_colors: Dict[int:List[float]]
+    class_colors: Dict[int, List[float]]
 ) -> None:
     os.makedirs(save_path, exist_ok=True)
 
@@ -271,7 +271,7 @@ def visualizeSegmentation(
     plt.close()
 
 
-def maskToColor(input_slice: np.ndarray, mask_slice: np.ndarray, class_colors: Dict[int:List[float]]) -> np.ndarray:
+def maskToColor(input_slice: np.ndarray, mask_slice: np.ndarray, class_colors: Dict[int, List[float]]) -> np.ndarray:
     input_normalized = (input_slice - input_slice.min()) / (input_slice.max() - input_slice.min() + 1e-8)
 
     colored = np.stack([input_normalized] * 3, axis=-1)
