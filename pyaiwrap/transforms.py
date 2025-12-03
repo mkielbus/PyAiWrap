@@ -464,7 +464,7 @@ class ChannelType(Enum):
     B = "B"
 
 
-class TransformFactory(ABC):
+class TransformCreator(ABC):
     """Abstract factory interface for creating transform compositions."""
 
     @abstractmethod
@@ -472,7 +472,7 @@ class TransformFactory(ABC):
         pass
 
 
-class RGBTransformFactory(TransformFactory):
+class RGBTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -480,7 +480,7 @@ class RGBTransformFactory(TransformFactory):
         ])
 
 
-class LABTransformFactory(TransformFactory):
+class LABTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -488,7 +488,7 @@ class LABTransformFactory(TransformFactory):
         ])
 
 
-class ABTransformFactory(TransformFactory):
+class ABTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         if output_channels not in [2, 3]:
             raise ValueError("output_channels must be 2 or 3 for 'ab' channel_type")
@@ -499,7 +499,7 @@ class ABTransformFactory(TransformFactory):
         ])
 
 
-class ABTo3ChannelTransformFactory(TransformFactory):
+class ABTo3ChannelTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -508,7 +508,7 @@ class ABTo3ChannelTransformFactory(TransformFactory):
         ])
 
 
-class LuminanceTransformFactory(TransformFactory):
+class LuminanceTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         if not is_input:
             raise ValueError("luminance can only be used for input channels, not target channels")
@@ -519,7 +519,7 @@ class LuminanceTransformFactory(TransformFactory):
         ])
 
 
-class RedChannelTransformFactory(TransformFactory):
+class RedChannelTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -528,7 +528,7 @@ class RedChannelTransformFactory(TransformFactory):
         ])
 
 
-class GreenChannelTransformFactory(TransformFactory):
+class GreenChannelTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -537,7 +537,7 @@ class GreenChannelTransformFactory(TransformFactory):
         ])
 
 
-class BlueChannelTransformFactory(TransformFactory):
+class BlueChannelTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -546,18 +546,18 @@ class BlueChannelTransformFactory(TransformFactory):
         ])
 
 
-class ChannelTransformCreator:
+class ChannelTransformFactory:
     """Main creator class that uses the abstract factory pattern."""
 
-    _factories: Dict[ChannelType, TransformFactory] = {
-        ChannelType.RGB: RGBTransformFactory(),
-        ChannelType.LAB: LABTransformFactory(),
-        ChannelType.AB: ABTransformFactory(),
-        ChannelType.AB_TO_3CH: ABTo3ChannelTransformFactory(),
-        ChannelType.LUMINANCE: LuminanceTransformFactory(),
-        ChannelType.R: RedChannelTransformFactory(),
-        ChannelType.G: GreenChannelTransformFactory(),
-        ChannelType.B: BlueChannelTransformFactory()
+    _creators: Dict[ChannelType, TransformCreator] = {
+        ChannelType.RGB: RGBTransformCreator(),
+        ChannelType.LAB: LABTransformCreator(),
+        ChannelType.AB: ABTransformCreator(),
+        ChannelType.AB_TO_3CH: ABTo3ChannelTransformCreator(),
+        ChannelType.LUMINANCE: LuminanceTransformCreator(),
+        ChannelType.R: RedChannelTransformCreator(),
+        ChannelType.G: GreenChannelTransformCreator(),
+        ChannelType.B: BlueChannelTransformCreator()
     }
 
     @classmethod
@@ -565,7 +565,7 @@ class ChannelTransformCreator:
         """Get the appropriate transform for the given channel type."""
         try:
             channel_enum = ChannelType(channel_type)
-            factory = cls._factories[channel_enum]
-            return factory.createTransform(image_size, output_channels, is_input)
+            creator = cls._creators[channel_enum]
+            return creator.createTransform(image_size, output_channels, is_input)
         except (KeyError, ValueError):
             raise ValueError(f"channel_type must be 'luminance', 'R', 'G', 'B', or 'RGB', got '{channel_type}'")

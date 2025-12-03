@@ -18,7 +18,7 @@ class ModularClassType(Enum):
     CONV_ATTEN_COLORIZATION = "ConvAttenColorizationNetwork"
 
 
-class GeneratorFactory(ABC):
+class GeneratorCreator(ABC):
     """Abstract base class for generator factories."""
 
     @abstractmethod
@@ -30,7 +30,7 @@ class GeneratorFactory(ABC):
         pass
 
 
-class StandaloneGeneratorFactory(GeneratorFactory):
+class StandaloneGeneratorCreator(GeneratorCreator):
     def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
         architecture_path = config["ARCHITECTURE_PATH"]
         generator = buildNeuralNetworkFromJson(
@@ -42,7 +42,7 @@ class StandaloneGeneratorFactory(GeneratorFactory):
         return "Using standalone generator"
 
 
-class SubmodularGeneratorFactory(GeneratorFactory):
+class SubmodularGeneratorCreator(GeneratorCreator):
     def createGenerator(self, architecture_id: str, submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
         architecture_path = config["ARCHITECTURE_PATH"]
         modular_class_type = config["MODULAR_CLASS"]
@@ -72,20 +72,20 @@ class SubmodularGeneratorFactory(GeneratorFactory):
         return "Using submodular generator with pretrained components"
 
 
-class GeneratorCreator:
+class GeneratorFactory:
     """Factory manager that creates generators based on type."""
 
-    _factories = {
-        GeneratorType.STANDALONE: StandaloneGeneratorFactory(),
-        GeneratorType.SUBMODULAR: SubmodularGeneratorFactory()
+    creators = {
+        GeneratorType.STANDALONE: StandaloneGeneratorCreator(),
+        GeneratorType.SUBMODULAR: SubmodularGeneratorCreator()
     }
 
     @classmethod
     def createGenerator(cls, generator_type: GeneratorType, architecture_id: str,
                         submodules: List[str], device: torch.device, config: Config) -> torch.nn.Module:
         """Create generator based on type."""
-        factory = cls._factories[generator_type]
-        return factory.createGenerator(architecture_id, submodules, device, config)
+        creator = cls.creators[generator_type]
+        return creator.createGenerator(architecture_id, submodules, device, config)
 
 
 def createGenerator(config: Config, device: torch.device) -> torch.nn.Module:
@@ -107,4 +107,4 @@ def createGenerator(config: Config, device: torch.device) -> torch.nn.Module:
     else:
         generator_type = GeneratorType.STANDALONE
 
-    return GeneratorCreator.createGenerator(generator_type, architecture_id, submodules, device, config)
+    return GeneratorFactory.createGenerator(generator_type, architecture_id, submodules, device, config)

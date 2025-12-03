@@ -11,7 +11,7 @@ class OptimizerType(Enum):
     ADAMW = "adamw"
 
 
-class OptimizerFactory(ABC):
+class OptimizerCreator(ABC):
     """Abstract base class for optimizer factories."""
 
     @abstractmethod
@@ -23,7 +23,7 @@ class OptimizerFactory(ABC):
         pass
 
 
-class AdamOptimizerFactory(OptimizerFactory):
+class AdamOptimizerCreator(OptimizerCreator):
     def createOptimizer(self, parameters, config: Config) -> torch.optim.Optimizer:
         return torch.optim.Adam(
             parameters,
@@ -34,7 +34,7 @@ class AdamOptimizerFactory(OptimizerFactory):
         return "Using Adam optimizer"
 
 
-class AdamWOptimizerFactory(OptimizerFactory):
+class AdamWOptimizerCreator(OptimizerCreator):
     def createOptimizer(self, parameters, config: Config) -> torch.optim.Optimizer:
         return torch.optim.AdamW(
             parameters,
@@ -51,20 +51,20 @@ class AdamWOptimizerFactory(OptimizerFactory):
         return f"Using AdamW optimizer with weight decay: {weight_decay}"
 
 
-class OptimizerCreator:
+class OptimizerFactory:
     """Factory manager that creates optimizers based on type."""
 
-    _factories = {
-        OptimizerType.ADAM: AdamOptimizerFactory(),
-        OptimizerType.ADAMW: AdamWOptimizerFactory()
+    _creators = {
+        OptimizerType.ADAM: AdamOptimizerCreator(),
+        OptimizerType.ADAMW: AdamWOptimizerCreator()
     }
 
     @classmethod
     def createOptimizer(cls, optimizer_type: OptimizerType, parameters: Iterator[Parameter],
                         config: Config) -> torch.optim.Optimizer:
         """Create optimizer and return as dictionary."""
-        factory = cls._factories[optimizer_type]
-        return factory.createOptimizer(parameters, config)
+        creator = cls._creators[optimizer_type]
+        return creator.createOptimizer(parameters, config)
 
 
 def createOptimizer(model_parameters: Iterator[Parameter],
@@ -82,4 +82,4 @@ def createOptimizer(model_parameters: Iterator[Parameter],
     optimizer_type = config["OPTIMIZER_TYPE"]
     optimizer_type = OptimizerType(optimizer_type)
 
-    return OptimizerCreator.createOptimizer(optimizer_type, model_parameters, config)
+    return OptimizerFactory.createOptimizer(optimizer_type, model_parameters, config)

@@ -18,7 +18,7 @@ class SchedulerType(Enum):
     MULTI_STEP = "multi_step"
 
 
-class SchedulerFactory(ABC):
+class SchedulerCreator(ABC):
     """Abstract base class for scheduler factories."""
 
     @abstractmethod
@@ -26,7 +26,7 @@ class SchedulerFactory(ABC):
         pass
 
 
-class CosineWarmRestartsFactory(SchedulerFactory):
+class CosineWarmRestartsCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
@@ -36,7 +36,7 @@ class CosineWarmRestartsFactory(SchedulerFactory):
         )
 
 
-class OneCycleFactory(SchedulerFactory):
+class OneCycleCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         learningRate = config["LEARNING_RATE"]
         trainingDatasetSize = config["TRAINING_DATASET_SIZE"]
@@ -51,7 +51,7 @@ class OneCycleFactory(SchedulerFactory):
         )
 
 
-class CosineFactory(SchedulerFactory):
+class CosineCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
@@ -60,7 +60,7 @@ class CosineFactory(SchedulerFactory):
         )
 
 
-class StepFactory(SchedulerFactory):
+class StepCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.StepLR(
             optimizer,
@@ -69,7 +69,7 @@ class StepFactory(SchedulerFactory):
         )
 
 
-class ExponentialFactory(SchedulerFactory):
+class ExponentialCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return torch.optim.lr_scheduler.ExponentialLR(
             optimizer,
@@ -77,7 +77,7 @@ class ExponentialFactory(SchedulerFactory):
         )
 
 
-class MultiStepFactory(SchedulerFactory):
+class MultiStepCreator(SchedulerCreator):
     """Factory for iteration-based MultiStepLR."""
     def createScheduler(self, optimizer, config: Config):
 
@@ -143,7 +143,7 @@ class PolyWarmupScheduler(_LRScheduler):
         return [lr for _ in self.optimizer.param_groups]
 
 
-class PolyWarmupFactory(SchedulerFactory):
+class PolyWarmupCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return PolyWarmupScheduler(
             optimizer,
@@ -155,23 +155,23 @@ class PolyWarmupFactory(SchedulerFactory):
         )
 
 
-class SchedulerCreator:
+class SchedulerFactory:
     """Factory manager that creates schedulers based on type."""
 
-    _factories = {
-        SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsFactory(),
-        SchedulerType.ONECYCLE: OneCycleFactory(),
-        SchedulerType.COSINE: CosineFactory(),
-        SchedulerType.STEP: StepFactory(),
-        SchedulerType.EXPONENTIAL: ExponentialFactory(),
-        SchedulerType.POLYWARMUP: PolyWarmupFactory(),
-        SchedulerType.MULTI_STEP: MultiStepFactory()
+    _creators = {
+        SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsCreator(),
+        SchedulerType.ONECYCLE: OneCycleCreator(),
+        SchedulerType.COSINE: CosineCreator(),
+        SchedulerType.STEP: StepCreator(),
+        SchedulerType.EXPONENTIAL: ExponentialCreator(),
+        SchedulerType.POLYWARMUP: PolyWarmupCreator(),
+        SchedulerType.MULTI_STEP: MultiStepCreator()
     }
 
     @classmethod
     def createScheduler(cls, scheduler_type: SchedulerType, optimizer, config: Config):
-        factory = cls._factories[scheduler_type]
-        return factory.createScheduler(optimizer, config)
+        creator = cls._creators[scheduler_type]
+        return creator.createScheduler(optimizer, config)
 
 
 def createScheduler(optimizer, config: Config, train_loader_len: int):
@@ -191,4 +191,4 @@ def createScheduler(optimizer, config: Config, train_loader_len: int):
     config_with_dataset_size["TRAINING_DATASET_SIZE"] = train_loader_len
 
     scheduler_type = SchedulerType(config_with_dataset_size["SCHEDULER_TYPE"])
-    return SchedulerCreator.createScheduler(scheduler_type, optimizer, config_with_dataset_size)
+    return SchedulerFactory.createScheduler(scheduler_type, optimizer, config_with_dataset_size)
