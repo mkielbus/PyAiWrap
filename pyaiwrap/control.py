@@ -1,290 +1,135 @@
 from typing import Dict, Tuple
-import torch.nn as nn
+from abc import ABC, abstractmethod
 import torch
-from .visualize import visualizeReconstruction
-from .visualize import visualizeSegmentation
+from .visualize import ColorizationVisualizer, SegmentationVisualizer, \
+    VisualizationStrategy
 
 
-class GeneratorControlFunc:
-    """
-    Callable class for visualizing generator reconstruction during training.
-    """
+class ControlFunction(ABC):
+    """Abstract base class for control functions."""
+
+    @abstractmethod
+    def __call__(self, *args, **kwargs) -> None:
+        pass
+
+
+class PhaseAwareControlFunction(ControlFunction):
+    """Base class for control functions that handle both train and val phases."""
+
+    def __init__(self, visualizer: VisualizationStrategy):
+        self.visualizer = visualizer
+
+    def processPhase(self, phase: str, batch: Tuple,
+                     models: Dict[str, torch.nn.Module],
+                     epoch: int, diagrams_path: str,
+                     config_id: str, model_type: str,
+                     launch_number: int) -> None:
+        """Process a single phase (train or val). To be implemented by subclasses."""
+        raise NotImplementedError
+
+    def __call__(self, models: Dict[str, torch.nn.Module],
+                 train_batch: Tuple, val_batch: Tuple,
+                 epoch: int, diagrams_path: str,
+                 config_id: str, model_type: str,
+                 launch_number: int) -> None:
+
+        self.processPhase("train", train_batch, models, epoch,
+                          diagrams_path, config_id, model_type, launch_number)
+
+        self.processPhase("val", val_batch, models, epoch,
+                          diagrams_path, config_id, model_type, launch_number)
+
+
+class ColorizationControlFunction(PhaseAwareControlFunction):
+    """Control function for colorization/reconstruction tasks."""
 
     def __init__(self, target_channel: str = "RGB", input_channel: str = "RGB"):
-        """
-        Initialize the control function with target channel.
-
-        Args:
-            target_channel: Target channel for single-channel models ("R", "G", "B", or "RGB")
-        """
+        visualizer = ColorizationVisualizer()
+        super().__init__(visualizer)
         self.target_channel = target_channel
         self.input_channel = input_channel
 
-    def __call__(
-        self,
-        models: Dict[str, nn.Module],
-        train_batch: Tuple,
-        val_batch: Tuple,
-        epoch: int,
-        diagrams_path: str,
-        hyperparams_id: str,
-        model_type: str,
-        launch_number: int
-    ) -> None:
-        """
-        Control function for visualizing generator reconstruction during training.
+    def processPhase(self, phase: str, batch: Tuple,
+                     models: Dict[str, torch.nn.Module],
+                     epoch: int, diagrams_path: str,
+                     config_id: str, model_type: str,
+                     launch_number: int) -> None:
 
-        Args:
-            models: Dictionary containing the generator model
-            train_batch: Batch from training data (modified_images, original_images)
-            val_batch: Batch from validation data (modified_images, original_images)
-            epoch: Current epoch number
-            diagrams_path: Path to save visualizations
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (for naming files)
-            launch_number: Launch number for this training run
-        """
         generator = models['generator']
         generator.eval()
 
-        train_modified, train_original = train_batch[0], train_batch[1]
-        val_modified, val_original = val_batch[0], val_batch[1]
+        modified, original = batch[0], batch[1]
 
         with torch.no_grad():
-            train_reconstructed = generator(train_modified)
-            val_reconstructed = generator(val_modified)
+            reconstructed = generator(modified)
 
-        visualizeReconstruction(
-            originalImages=train_original,
-            modifiedImages=train_modified,
-            reconstructedImages=train_reconstructed,
-            epoch=epoch,
-            savePath=diagrams_path,
-            modelType=f"train_{model_type}",
-            launchNumber=launch_number,
-            hyperparamsId=hyperparams_id,
-            numImages=8,
-            targetChannel=self.target_channel,
-            inputChannel=self.input_channel
-        )
+        phase_model_type = f"{phase}_{model_type}"
 
-        visualizeReconstruction(
-            originalImages=val_original,
-            modifiedImages=val_modified,
-            reconstructedImages=val_reconstructed,
-            epoch=epoch,
-            savePath=diagrams_path,
-            modelType=f"val_{model_type}",
-            launchNumber=launch_number,
-            hyperparamsId=hyperparams_id,
-            numImages=8,
-            targetChannel=self.target_channel,
-            inputChannel=self.input_channel
-        )
-
-
-class VAEControlFunc:
-    """
-    Callable class for visualizing VAE reconstruction during training.
-    """
-
-    def __init__(self, target_channel: str = "RGB"):
-        """
-        Initialize the control function with target channel.
-
-        Args:
-            target_channel: Target channel for single-channel models ("R", "G", "B", or "RGB")
-        """
-        self.target_channel = target_channel
-
-    def __call__(
-        self,
-        models: Dict[str, nn.Module],
-        train_batch: Tuple,
-        val_batch: Tuple,
-        epoch: int,
-        diagrams_path: str,
-        hyperparams_id: str,
-        model_type: str,
-        launch_number: int
-    ) -> None:
-        """
-        Control function for visualizing VAE reconstruction during training.
-
-        Args:
-            models: Dictionary containing the VAE model
-            train_batch: Batch from training data (modified_images, original_images)
-            val_batch: Batch from validation data (modified_images, original_images)
-            epoch: Current epoch number
-            diagrams_path: Path to save visualizations
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (for naming files)
-            launch_number: Launch number for this training run
-        """
-        vae = models['vae']
-        vae.eval()
-
-        train_modified, train_original = train_batch[0], train_batch[1]
-        val_modified, val_original = val_batch[0], val_batch[1]
-
-        with torch.no_grad():
-            train_reconstructed, train_mu, train_logvar = vae(train_modified)
-            val_reconstructed, val_mu, val_logvar = vae(val_modified)
-
-        visualizeReconstruction(
-            original_images=train_original,
-            modified_images=train_modified,
-            reconstructed_images=train_reconstructed,
+        self.visualizer.visualize(
+            original_images=original,
+            modified_images=modified,
+            reconstructed_images=reconstructed,
             epoch=epoch,
             save_path=diagrams_path,
-            model_type=f"{model_type}_train",
-            hyperparams_id=hyperparams_id,
+            model_type=phase_model_type,
             launch_number=launch_number,
+            config_id=config_id,
             num_images=8,
-            target_channel=self.target_channel
-        )
-
-        visualizeReconstruction(
-            original_images=val_original,
-            modified_images=val_modified,
-            reconstructed_images=val_reconstructed,
-            epoch=epoch,
-            save_path=diagrams_path,
-            model_type=f"{model_type}_val",
-            hyperparams_id=hyperparams_id,
-            launch_number=launch_number,
-            num_images=8,
-            target_channel=self.target_channel
+            target_channel=self.target_channel,
+            input_channel=self.input_channel
         )
 
 
-class GANControlFunc:
-    """
-    Callable class for visualizing GAN generation during training.
-    """
+class SegmentationControlFunction(PhaseAwareControlFunction):
+    """Control function for segmentation tasks."""
 
-    def __init__(self, target_channel: str = "RGB"):
-        """
-        Initialize the control function with target channel.
-
-        Args:
-            target_channel: Target channel for single-channel models ("R", "G", "B", or "RGB")
-        """
-        self.target_channel = target_channel
-
-    def __call__(
-        self,
-        models: Dict[str, nn.Module],
-        train_batch: Tuple,
-        val_batch: Tuple,
-        epoch: int,
-        diagrams_path: str,
-        hyperparams_id: str,
-        model_type: str,
-        launch_number: int
-    ) -> None:
-        """
-        Control function for visualizing GAN generation during training.
-
-        Args:
-            models: Dictionary containing generator and discriminator models
-            train_batch: Batch from training data
-            val_batch: Batch from validation data
-            epoch: Current epoch number
-            diagrams_path: Path to save visualizations
-            hyperparams_id: Hyperparameter configuration ID
-            model_type: Type of model (for naming files)
-            launch_number: Launch number for this training run
-        """
-        generator = models['generator']
-        generator.eval()
-
-        train_modified, train_original = train_batch[1], train_batch[1]
-        val_modified, val_original = val_batch[0], val_batch[1]
-
-        with torch.no_grad():
-            train_generated = generator(train_modified)
-            val_generated = generator(val_modified)
-
-        visualizeReconstruction(
-            original_images=train_original,
-            modified_images=train_modified,
-            reconstructed_images=train_generated,
-            epoch=epoch,
-            save_path=diagrams_path,
-            model_type=f"{model_type}_train",
-            hyperparams_id=hyperparams_id,
-            launch_number=launch_number,
-            num_images=8,
-            target_channel=self.target_channel
-        )
-
-        visualizeReconstruction(
-            original_images=val_original,
-            modified_images=val_modified,
-            reconstructed_images=val_generated,
-            epoch=epoch,
-            save_path=diagrams_path,
-            model_type=f"{model_type}_val",
-            hyperparams_id=hyperparams_id,
-            launch_number=launch_number,
-            num_images=8,
-            target_channel=self.target_channel
-        )
-
-
-class SegmentationControlFunc:
     def __init__(self, num_classes: int = 4):
-        self.num_classes = num_classes
-        self.class_colors = {
-            1: [0.2, 0.8, 0.2],
-            2: [0.9, 0.9, 0.2],
-            3: [0.9, 0.3, 0.3]
+        classColors = {
+            1: [0.2, 0.8, 0.2],    # Healthy
+            2: [0.9, 0.9, 0.2],    # Partially injured
+            3: [0.9, 0.3, 0.3]     # Completely ruptured
         }
+        visualizer = SegmentationVisualizer(classColors)
+        super().__init__(visualizer)
+        self.num_classes = num_classes
 
-    def __call__(
-        self,
-        models: Dict[str, nn.Module],
-        train_batch: Tuple,
-        val_batch: Tuple,
-        epoch: int,
-        diagrams_path: str,
-        hyperparams_id: str,
-        model_type: str,
-        launch_number: int
-    ) -> None:
+    def processPhase(self, phase: str, batch: Tuple,
+                     models: Dict[str, torch.nn.Module],
+                     epoch: int, diagrams_path: str,
+                     config_id: str, model_type: str,
+                     launch_number: int) -> None:
+
         seg_model = models['segformer']
         seg_model.eval()
 
-        train_volumes, train_masks = train_batch[0], train_batch[1]
-        val_volumes, val_masks = val_batch[0], val_batch[1]
+        volumes, masks = batch[0], batch[1]
 
         with torch.no_grad():
-            train_preds = seg_model(train_volumes)
-            val_preds = seg_model(val_volumes)
+            preds = seg_model(volumes)
 
-        visualizeSegmentation(
-            volumes=train_volumes,
-            true_masks=train_masks,
-            pred_logits=train_preds,
+        self.visualizer.visualize(
+            volumes=volumes,
+            true_masks=masks,
+            pred_logits=preds,
             epoch=epoch,
             save_path=diagrams_path,
-            phase="train",
-            hyperparams_id=hyperparams_id,
+            phase=phase,
+            config_id=config_id,
             model_type=model_type,
-            launch_number=launch_number,
-            class_colors=self.class_colors
+            launch_number=launch_number
         )
 
-        visualizeSegmentation(
-            volumes=val_volumes,
-            true_masks=val_masks,
-            pred_logits=val_preds,
-            epoch=epoch,
-            save_path=diagrams_path,
-            phase="val",
-            hyperparams_id=hyperparams_id,
-            model_type=model_type,
-            launch_number=launch_number,
-            class_colors=self.class_colors
-        )
+
+class ControlFunctionFactory:
+    """Factory for creating different types of control functions."""
+
+    @staticmethod
+    def createColorizationControl(target_channel: str = "RGB",
+                                  input_channel: str = "RGB") -> ColorizationControlFunction:
+        """Create a control function for colorization/reconstruction tasks."""
+        return ColorizationControlFunction(target_channel, input_channel)
+
+    @staticmethod
+    def createSegmentationControl(num_classes: int = 4) -> SegmentationControlFunction:
+        """Create a control function for segmentation tasks."""
+        return SegmentationControlFunction(num_classes)

@@ -17,7 +17,7 @@ def train(
     device: torch.device = torch.device("cuda"),
     num_epochs: int = 100,
     diagrams_data_path: str = "./diagrams_data",
-    hyperparams_id: str = "0",
+    config_id: str = "0",
     weights_path: str = "./weights",
     diagrams_path: str = "./diagrams",
     launch_number: int = 0,
@@ -82,7 +82,7 @@ def train(
     os.makedirs(diagrams_path, exist_ok=True)
 
     for model_name, model in models.items():
-        model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
+        model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{config_id}.pth")
         if os.path.exists(model_path):
             print(f"Loading existing weights for {model_name} from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
@@ -180,14 +180,14 @@ def train(
                     val_batch=first_batch_val,
                     epoch=epoch + 1,
                     diagrams_path=diagrams_path,
-                    hyperparams_id=hyperparams_id,
+                    config_id=config_id,
                     model_type=model_type,
                     launch_number=launch_number
                 )
 
-        metrics.save(diagrams_data_path, hyperparams_id, model_type, launch_number)
+        metrics.save(diagrams_data_path, config_id, model_type, launch_number)
         for model_name, model in models.items():
-            model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
+            model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{config_id}.pth")
             torch.save(model.state_dict(), model_path)
 
         val_metric = metrics.getMetric(epoch + 1, 'val', early_stopping_metric)
@@ -196,7 +196,7 @@ def train(
             best_val_metric = val_metric
             current_patience = 0
             for model_name, model in models.items():
-                model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{hyperparams_id}.pth")
+                model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{config_id}.pth")
                 torch.save(model.state_dict(), model_path)
         else:
             current_patience += 1
