@@ -20,101 +20,97 @@ class ImageConverter:
     """Handles image conversion between different color spaces."""
 
     def __init__(self):
-        self.channel_handlers = {
-            "RGB": self.handleRgb,
-            "luminance": self.handleLuminance,
-            "AB": self.handleAb,
-            "LAB": self.handleLab,
-            "R": self.handleSingleChannel,
-            "G": self.handleSingleChannel,
-            "B": self.handleSingleChannel,
+        self.single_channel_converters = {
+            "RGB": self._convertRgb,
+            "luminance": self._convertLuminance,
+            "AB": self._convertAb,
+            "LAB": self._convertLab,
+            "R": self._convertSingleChannel,
+            "G": self._convertSingleChannel,
+            "B": self._convertSingleChannel,
         }
 
     def convert(self, images: torch.Tensor, channel_type: str,
                 paired_images: Optional[torch.Tensor] = None,
                 input_range: str = "zero_one") -> torch.Tensor:
-        """Convert images to RGB based on channel type."""
-        handler = self.channel_handlers.get(channel_type, self.handleDefault)
-        return handler(images, channel_type, paired_images, input_range)
+        """Convert images to RGB using dispatch pattern."""
 
-    def handleRgb(self, images: torch.Tensor, channel_type: str,
-                  paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
+        if self._isLAbPair(images, paired_images):
+            rgb = self._convertLAbPair(images, paired_images, input_range)
+            return self._ensureBatchDimension(rgb)
+
+        converter = self.single_channel_converters.get(channel_type, self._convertDefault)
+        rgb = converter(images, channel_type, input_range)
+        return self._ensureBatchDimension(rgb)
+
+    def _ensureBatchDimension(self, rgb: torch.Tensor) -> torch.Tensor:
+        if rgb.dim() == 3:
+            rgb = rgb.unsqueeze(0)
+        return rgb
+
+    def _isLAbPair(self, images: torch.Tensor, paired_images: Optional[torch.Tensor]) -> bool:
+        """Check if we have an L+AB pair."""
+        return paired_images is not None and (
+            (images.shape[1] == 1 and paired_images.shape[1] == 2) or
+            (images.shape[1] == 2 and paired_images.shape[1] == 1)
+        )
+
+    def _convertLAbPair(self, images: torch.Tensor, paired_images: torch.Tensor,
+                        input_range: str) -> torch.Tensor:
+        """Convert L+AB pair to RGB."""
+        if images.shape[1] == 1:  # images is L, paired_images is AB
+            l_channel, ab_channels = images, paired_images
+        else:  # images is AB, paired_images is L
+            l_channel, ab_channels = paired_images, images
+
+        if input_range == "zero_one":
+            l_channel = l_channel * 100.0
+            ab_channels = ab_channels * 254.0 - 127.0
+
+        return labToRgb(l_channel, ab_channels)
+
+    def _convertRgb(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """RGB passes through unchanged."""
         return images
 
-    def handleLuminance(self, images: torch.Tensor, channel_type: str,
-                        paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
-        if self.isLToABCase(images, paired_images):
-            return self.convertLtoRgb(images, paired_images, input_range)
-        return self.convertLtoGrayscale(images, input_range)
+    def _convertLuminance(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """Convert luminance to grayscale RGB."""
+        factor = 1.0 if input_range == "zero_one" else 1.0 / 100.0
+        return (images * factor).repeat(1, 3, 1, 1)
 
-    def handleAb(self, images: torch.Tensor, channel_type: str,
-                 paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
-        if self.isLToABCase(images, paired_images):
-            return self.convertAbToRgb(images, paired_images, input_range)
-        return self.convertAbToFalseColor(images, input_range)
-
-    def handleLab(self, images: torch.Tensor, channel_type: str,
-                  paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
-        if input_range == "zero_one":
-            images = self.normalizeLabToKornia(images)
-        return labToRgbForVisualization(images)
-
-    def handleSingleChannel(self, images: torch.Tensor, channel_type: str,
-                            paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
-        channelMap = {"R": 0, "G": 1, "B": 2}
-        zeros = torch.zeros_like(images)
-
-        if channel_type in channelMap:
-            rgbChannels = [zeros, zeros, zeros]
-            rgbChannels[channelMap[channel_type]] = images
-            return torch.cat(rgbChannels, dim=1)
-        return images.repeat(1, 3, 1, 1)
-
-    def handleDefault(self, images: torch.Tensor, channel_type: str,
-                      paired_images: Optional[torch.Tensor], input_range: str) -> torch.Tensor:
-        return images.repeat(1, 3, 1, 1)
-
-    def isLToABCase(self, images: torch.Tensor,
-                    paired_images: Optional[torch.Tensor]) -> bool:
-        return (paired_images is not None and
-                ((images.shape[1] == 1 and paired_images.shape[1] == 2) or
-                 (images.shape[1] == 2 and paired_images.shape[1] == 1)))
-
-    def convertLtoRgb(self, l_channel: torch.Tensor, ab_channels: torch.Tensor,
-                      inputRange: str) -> torch.Tensor:
-        if inputRange == "zero_one":
-            l_channel = l_channel * 100.0
-        return labToRgb(l_channel, ab_channels)
-
-    def convertLtoGrayscale(self, images: torch.Tensor, input_range: str) -> torch.Tensor:
-        if images.shape[1] == 1:
-            if input_range == "zero_one":
-                return images.repeat(1, 3, 1, 1)
-            return (images / 100.0).repeat(1, 3, 1, 1)
-        return images / 100.0 if input_range != "zero_one" else images
-
-    def convertAbToRgb(self, images: torch.Tensor, l_channel: torch.Tensor,
-                       input_range: str) -> torch.Tensor:
-        if input_range == "zero_one":
-            l_channel = l_channel * 100.0
-            ab_channels = images * 254.0 - 127.0
-        else:
-            ab_channels = images
-        return labToRgb(l_channel, ab_channels)
-
-    def convertAbToFalseColor(self, images: torch.Tensor, input_range: str) -> torch.Tensor:
+    def _convertAb(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """Convert AB channels to false-color RGB."""
         if input_range == "zero_one":
             images = images * 254.0 - 127.0
 
         zeros = torch.zeros_like(images[:, 0:1])
-        lab3ch = torch.cat([zeros, images], dim=1)
-        return labToRgbForVisualization(lab3ch)
+        lab_3ch = torch.cat([zeros, images], dim=1)
+        return labToRgbForVisualization(lab_3ch)
 
-    def normalizeLabToKornia(self, images: torch.Tensor) -> torch.Tensor:
-        lab_kornia = torch.zeros_like(images)
-        lab_kornia[:, 0:1] = images[:, 0:1] * 100.0
-        lab_kornia[:, 1:3] = images[:, 1:3] * 254.0 - 127.0
-        return lab_kornia
+    def _convertLab(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """Convert LAB channels to RGB."""
+        if input_range == "zero_one":
+            lab = torch.zeros_like(images)
+            lab[:, 0:1] = images[:, 0:1] * 100.0
+            lab[:, 1:3] = images[:, 1:3] * 254.0 - 127.0
+            return labToRgbForVisualization(lab)
+        return labToRgbForVisualization(images)
+
+    def _convertSingleChannel(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """Convert single channel (R, G, or B) to RGB."""
+        zeros = torch.zeros_like(images)
+
+        channel_map = {
+            "R": (images, zeros, zeros),
+            "G": (zeros, images, zeros),
+            "B": (zeros, zeros, images)
+        }
+
+        return torch.cat(channel_map[channel_type], dim=1)
+
+    def _convertDefault(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+        """Default conversion for unknown channel types."""
+        return images.repeat(1, 3, 1, 1)
 
 
 class RangeDetector:
@@ -122,19 +118,13 @@ class RangeDetector:
 
     @staticmethod
     def detect(images: torch.Tensor, channel_type: str) -> str:
-        if channel_type in ["LAB", "AB"]:
-            return RangeDetector.detectLabRange(images)
-        elif channel_type == "luminance":
-            return RangeDetector.detectLuminanceRange(images)
+        """Detect if images are in [0,1] range or Kornia's native range."""
+        if channel_type in ["LAB", "AB", "luminance"]:
+            if images.min() >= 0 and images.max() <= 1:
+                return "zero_one"
+            else:
+                return "kornia"
         return "zero_one"
-
-    @staticmethod
-    def detectLabRange(images: torch.Tensor) -> str:
-        return "zero_one" if images.min() >= 0 and images.max() <= 1 else "kornia"
-
-    @staticmethod
-    def detectLuminanceRange(images: torch.Tensor) -> str:
-        return "zero_one" if images.min() >= 0 and images.max() <= 1 else "kornia"
 
 
 class ColorizationVisualizer(VisualizationStrategy):
@@ -143,6 +133,18 @@ class ColorizationVisualizer(VisualizationStrategy):
     def __init__(self):
         self.converter = ImageConverter()
         self.range_detector = RangeDetector()
+        self._setupConversionStrategies()
+
+    def _setupConversionStrategies(self):
+        """Setup strategy pattern for different conversion scenarios."""
+        self.conversion_strategies = {
+            ("luminance", "AB"): self._convertLuminanceAndAb
+        }
+
+        for channel in ["R", "G", "B"]:
+            self.conversion_strategies[("luminance", channel)] = self._convertSingleChannel
+
+        self.default_strategy = self._convertGeneral
 
     def visualize(self, original_images: torch.Tensor,
                   modified_images: torch.Tensor,
@@ -157,101 +159,117 @@ class ColorizationVisualizer(VisualizationStrategy):
                   target_channel: str = "RGB",
                   input_range: str = "auto") -> None:
 
-        original = original_images.detach().cpu()[:num_images]
-        modified = modified_images.detach().cpu()[:num_images]
-        reconstructed = reconstructed_images.detach().cpu()[:num_images]
+        images = self._prepareImages(
+            original_images, modified_images, reconstructed_images, num_images
+        )
 
-        ranges = self.getRanges(original, modified, reconstructed,
-                                input_channel, target_channel, input_range)
+        ranges = self._getRanges(images, input_channel, target_channel, input_range)
+        rgb_images = self._convertToRgb(images, input_channel, target_channel, ranges)
+        self._saveVisualization(rgb_images, epoch, save_path, model_type,
+                                launch_number, config_id, input_channel, target_channel)
 
-        original_rgb, modified_rgb, reconstructed_rgb = self.convertToRgb(
-            original, modified, reconstructed, input_channel, target_channel, ranges)
+    def _prepareImages(self, original: torch.Tensor, modified: torch.Tensor,
+                       reconstructed: torch.Tensor, num_images: int) -> Dict[str, torch.Tensor]:
+        """Prepare and extract subset of images."""
+        return {
+            "original": original.detach().cpu()[:num_images],
+            "modified": modified.detach().cpu()[:num_images],
+            "reconstructed": reconstructed.detach().cpu()[:num_images]
+        }
 
-        self.saveGrid(original_rgb, modified_rgb, reconstructed_rgb,
-                      epoch, save_path, model_type, launch_number,
-                      config_id, input_channel, target_channel)
-
-    def getRanges(self, original: torch.Tensor, modified: torch.Tensor,
-                  reconstructed: torch.Tensor, input_channel: str,
-                  target_channel: str, input_range: str) -> Tuple[str, str, str]:
+    def _getRanges(self, images: Dict[str, torch.Tensor], input_channel: str,
+                   target_channel: str, input_range: str) -> Dict[str, str]:
+        """Determine input ranges for each image set."""
         if input_range == "auto":
-            return (
-                self.range_detector.detect(original, target_channel),
-                self.range_detector.detect(modified, input_channel),
-                self.range_detector.detect(reconstructed, target_channel)
-            )
-        return input_range, input_range, input_range
+            return {
+                "original": self.range_detector.detect(images["original"], target_channel),
+                "modified": self.range_detector.detect(images["modified"], input_channel),
+                "reconstructed": self.range_detector.detect(images["reconstructed"], target_channel)
+            }
+        return {k: input_range for k in ["original", "modified", "reconstructed"]}
 
-    def convertToRgb(self, original: torch.Tensor, modified: torch.Tensor,
-                     reconstructed: torch.Tensor, input_channel: str,
-                     target_channel: str, ranges: Tuple[str, str, str]) -> Tuple[torch.Tensor, ...]:
+    def _convertToRgb(self, images: Dict[str, torch.Tensor], input_channel: str,
+                      target_channel: str, ranges: Dict[str, str]) -> Dict[str, torch.Tensor]:
+        """Convert all image sets to RGB using appropriate strategy."""
 
-        original_range, modified_range, reconstructed_range = ranges
-
-        if self.isColorizationCase(input_channel, target_channel):
-            return self.handleColorizationCase(original, modified, reconstructed,
-                                               original_range, modified_range, reconstructed_range)
-
-        original_rgb = self.converter.convert(original, target_channel,
-                                             input_range=original_range)
-        modified_rgb = self.converter.convert(modified, input_channel,
-                                             input_range=modified_range)
-        reconstructed_rgb = self.converter.convert(reconstructed, target_channel,
-                                                  input_range=reconstructed_range)
-
-        return self.clampImages(original_rgb, modified_rgb, reconstructed_rgb)
-
-    def isColorizationCase(self, input_channel: str, target_channel: str) -> bool:
-        colorizationCases = [
-            (input_channel == "luminance" and target_channel == "AB"),
-            (input_channel == "RGB" and target_channel == "AB"),
-            (input_channel == "RGB" and target_channel == "LAB"),
-            (input_channel in ["R", "G", "B", "luminance"] and
-             target_channel in ["R", "G", "B"] and input_channel == target_channel)
-        ]
-        return any(colorizationCases)
-
-    def handleColorizationCase(self, original: torch.Tensor, modified: torch.Tensor,
-                               reconstructed: torch.Tensor, original_range: str,
-                               modified_range: str, reconstructed_range: str) -> Tuple[torch.Tensor, ...]:
-
-        if modified.shape[1] == 3:  # RGB input
-            l_channel = self.calculateLuminance(modified) * 100.0
+        strategy_key = (input_channel, target_channel)
+        strategy = self.conversion_strategies.get(strategy_key, self.default_strategy)
+        if target_channel in ("R", "G", "B"):
+            return strategy(images, ranges, input_channel, target_channel)
         else:
-            l_channel = modified * 100.0 if modified_range == "zero_one" else modified
+            return strategy(images, ranges)
 
-        original_rgb = self.converter.convert(original, "AB",
-                                              paired_images=l_channel,
-                                              input_range=original_range)
-        modified_rgb = self.converter.convert(modified, "luminance" if modified.shape[1] == 1 else "RGB",
-                                              input_range=modified_range)
-        reconstructed_rgb = self.converter.convert(reconstructed, "AB",
-                                                   paired_images=l_channel,
-                                                   input_range=reconstructed_range)
+    def _convertLuminanceAndAb(self, images: Dict[str, torch.Tensor],
+                               ranges: Dict[str, str]) -> Dict[str, torch.Tensor]:
+        """Strategy for L -> AB colorization."""
+        modified = images["modified"]
+        modified_range = ranges["modified"]
 
-        return self.clampImages(original_rgb, modified_rgb, reconstructed_rgb)
+        l_channel = modified * 100.0 if modified_range == "zero_one" else modified
 
-    def calculateLuminance(self, rgb_images: torch.Tensor) -> torch.Tensor:
-        return 0.299 * rgb_images[:, 0:1] + 0.587 * rgb_images[:, 1:2] + 0.114 * rgb_images[:, 2:3]
+        return {
+            "original": self.converter.convert(
+                images["original"], "AB", paired_images=l_channel,
+                input_range=ranges["original"]
+            ),
+            "modified": self.converter.convert(modified, "luminance", input_range=modified_range),
+            "reconstructed": self.converter.convert(
+                images["reconstructed"], "AB", paired_images=l_channel,
+                input_range=ranges["reconstructed"]
+            )
+        }
 
-    def clampImages(self, *images: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        return tuple(torch.clamp(img, 0, 1) for img in images)
+    def _convertSingleChannel(self, images: Dict[str, torch.Tensor],
+                              ranges: Dict[str, str],
+                              input_channel: str, target_channel: str) -> Dict[str, torch.Tensor]:
+        return {
+            "original": self.converter.convert(
+                images["original"], target_channel, input_range=ranges["original"]
+            ),
+            "modified": self.converter.convert(
+                images["modified"], input_channel, input_range=ranges["modified"]
+            ),
+            "reconstructed": self.converter.convert(
+                images["reconstructed"], target_channel, input_range=ranges["reconstructed"]
+            )
+        }
 
-    def saveGrid(self, original_rgb: torch.Tensor, modified_rgb: torch.Tensor,
-                 reconstructed_rgb: torch.Tensor, epoch: int, save_path: str,
-                 model_type: str, launch_number: str, config_id: str,
-                 inputChannel: str, targetChannel: str) -> None:
+    def _convertGeneral(self, images: Dict[str, torch.Tensor],
+                        ranges: Dict[str, str]) -> Dict[str, torch.Tensor]:
+        """Default strategy for general conversions."""
+        return {
+            "original": self.converter.convert(
+                images["original"], "RGB", input_range=ranges["original"]
+            ),
+            "modified": self.converter.convert(
+                images["modified"], "RGB", input_range=ranges["modified"]
+            ),
+            "reconstructed": self.converter.convert(
+                images["reconstructed"], "RGB", input_range=ranges["reconstructed"]
+            )
+        }
+
+    def _extractLuminance(self, rgb_images: torch.Tensor) -> torch.Tensor:
+        """Extract luminance from RGB images."""
+        weights = torch.tensor([0.299, 0.587, 0.114], device=rgb_images.device).view(1, 3, 1, 1)
+        return (rgb_images * weights).sum(dim=1, keepdim=True)
+
+    def _saveVisualization(self, images: Dict[str, torch.Tensor], epoch: int,
+                           save_path: str, model_type: str, launch_number: str,
+                           config_id: str, input_channel: str, target_channel: str) -> None:
+        """Save visualization grid to file."""
 
         os.makedirs(save_path, exist_ok=True)
 
-        comparison = torch.cat([original_rgb, modified_rgb, reconstructed_rgb], dim=0)
-        grid = make_grid(comparison, nrow=original_rgb.shape[0], padding=2, normalize=False)
+        batch_sizes = [img.shape[0] for img in images.values()]
+        min_batch = min(batch_sizes)
 
-        saveFile = os.path.join(
-            save_path,
-            f'{model_type}_{launch_number}_{config_id}_epoch_{epoch:03d}_{inputChannel}_to_{targetChannel}.png'
-        )
-        save_image(grid, saveFile)
+        grid_images = [img[:min_batch] for img in images.values()]
+        comparison = torch.cat(grid_images, dim=0)
+        grid = make_grid(comparison, nrow=min_batch, padding=2, normalize=False)
+
+        filename = f'{model_type}_{launch_number}_{config_id}_epoch_{epoch:03d}_{input_channel}_to_{target_channel}.png'
+        save_image(grid, os.path.join(save_path, filename))
 
 
 class MaskCenterFinder:
