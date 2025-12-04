@@ -311,11 +311,11 @@ class MaskColorizer:
 
 
 class SegmentationVisualizer(VisualizationStrategy):
-    """Handles visualization of segmentation results."""
 
     def __init__(self, class_colors: Dict[int, List[float]] = None):
         self.mask_finder = MaskCenterFinder()
         self.colorizer = MaskColorizer(class_colors or self.defaultColors())
+        self.class_colors = class_colors
 
     def visualize(self, volumes: torch.Tensor, true_masks: torch.Tensor,
                   pred_logits: torch.Tensor, epoch: int, save_path: str,
@@ -324,13 +324,18 @@ class SegmentationVisualizer(VisualizationStrategy):
 
         os.makedirs(save_path, exist_ok=True)
 
-        batch_size = min(4, volumes.shape[0])
+        batch_size = min(2, volumes.shape[0])
         volumes_np, true_masks_np, pred_masks_np = self.prepareData(
             volumes, true_masks, pred_logits)
 
-        self.createVisualization(volumes_np, true_masks_np, pred_masks_np,
-                                 batch_size, epoch, phase, config_id,
-                                 model_type, launch_number, save_path)
+        for sample_idx in range(batch_size):
+            self.createFiveSliceVisualization(
+                volumes_np[sample_idx, 0],
+                true_masks_np[sample_idx],
+                pred_masks_np[sample_idx],
+                sample_idx, epoch, phase, config_id,
+                model_type, launch_number, save_path
+            )
 
     def prepareData(self, volumes: torch.Tensor, true_masks: torch.Tensor,
                     pred_logits: torch.Tensor) -> Tuple[np.ndarray, ...]:
@@ -345,62 +350,80 @@ class SegmentationVisualizer(VisualizationStrategy):
 
         return volumes_np, true_masks_np, pred_masks_np
 
-    def createVisualization(self, volumes_np: np.ndarray, true_masks_np: np.ndarray,
-                            pred_masks_np: np.ndarray, batch_size: int, epoch: int,
-                            phase: str, config_id: str, model_type: str,
-                            launch_number: int, save_path: str) -> None:
+    def createFiveSliceVisualization(self, volume: np.ndarray, true_mask: np.ndarray,
+                                     pred_mask: np.ndarray, sample_idx: int, epoch: int,
+                                     phase: str, config_id: str, model_type: str,
+                                     launch_number: int, save_path: str) -> None:
 
-        fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
-        if batch_size == 1:
+        center_slice = self.mask_finder.find(true_mask)
+        d = volume.shape[0]
+
+        slice_indices = []
+        for offset in [-2, -1, 0, 1, 2]:
+            slice_idx = center_slice + offset
+            slice_idx = max(0, min(d-1, slice_idx))
+            slice_indices.append(slice_idx)
+
+        slice_indices = list(dict.fromkeys(slice_indices))
+
+        fig, axes = plt.subplots(2, len(slice_indices), figsize=(len(slice_indices) * 3, 6))
+        if len(slice_indices) == 1:
             axes = axes.reshape(2, 1)
 
-        for i in range(batch_size):
-            slice_idx = self.mask_finder.find(true_masks_np[i])
-
-            input_slice = volumes_np[i, 0, slice_idx]
-            true_mask_slice = true_masks_np[i, slice_idx]
-            pred_mask_slice = pred_masks_np[i, slice_idx]
-
+        for col, slice_idx in enumerate(slice_indices):
+            input_slice = volume[slice_idx]
+            true_mask_slice = true_mask[slice_idx]
             true_colored = self.colorizer.colorize(input_slice, true_mask_slice)
+
+            axes[0, col].imshow(true_colored)
+            axes[0, col].set_title(f'GT Slice {slice_idx}')
+            axes[0, col].axis('off')
+
+            if slice_idx == center_slice:
+                for spine in axes[0, col].spines.values():
+                    spine.set_edgecolor('red')
+                    spine.set_linewidth(3)
+
+        for col, slice_idx in enumerate(slice_indices):
+            input_slice = volume[slice_idx]
+            pred_mask_slice = pred_mask[slice_idx]
             pred_colored = self.colorizer.colorize(input_slice, pred_mask_slice)
 
-            axes[0, i].imshow(true_colored)
-            axes[0, i].set_title(f'GT Sample {i+1}')
-            axes[0, i].axis('off')
+            axes[1, col].imshow(pred_colored)
+            axes[1, col].set_title(f'Pred Slice {slice_idx}')
+            axes[1, col].axis('off')
 
-            axes[1, i].imshow(pred_colored)
-            axes[1, i].set_title(f'Pred Sample {i+1}')
-            axes[1, i].axis('off')
+            if slice_idx == center_slice:
+                for spine in axes[1, col].spines.values():
+                    spine.set_edgecolor('red')
+                    spine.set_linewidth(3)
 
         self.addLegend(fig)
-        plt.suptitle(f'Epoch {epoch} - {phase.upper()} - Segmentation Results')
+
+        plt.suptitle(f'Epoch {epoch} - {phase.upper()} - Sample {sample_idx+1}',
+                     fontsize=14, y=1.02)
+
         plt.tight_layout()
 
-        self.saveFigure(fig, epoch, phase, config_id, model_type,
-                        launch_number, save_path)
+        filename = f"{model_type}_{phase}_sample_{sample_idx}_segmentation_epoch_{epoch}_{config_id}_{launch_number}.png"
+        filepath = os.path.join(save_path, filename)
+        plt.savefig(filepath, bbox_inches='tight', dpi=150, facecolor='white')
+        plt.close()
 
     def addLegend(self, fig) -> None:
         legend_elements = [
-            plt.Rectangle((0, 0), 1, 1, facecolor='gray', label='Background'),
-            plt.Rectangle((0, 0), 1, 1, facecolor=[0.2, 0.8, 0.2], label='Healthy'),
-            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.9, 0.2], label='Partially injured'),
-            plt.Rectangle((0, 0), 1, 1, facecolor=[0.9, 0.3, 0.3], label='Completely ruptured')
+            plt.Rectangle((0, 0), 1, 1, facecolor=self.class_colors[0], label='Background'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=self.class_colors[1], label='Healthy'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=self.class_colors[2], label='Partially injured'),
+            plt.Rectangle((0, 0), 1, 1, facecolor=self.class_colors[3], label='Completely ruptured')
         ]
         fig.legend(handles=legend_elements, loc='lower center', ncol=4,
-                   bbox_to_anchor=(0.5, -0.05))
-
-    def saveFigure(self, fig, epoch: int, phase: str, config_id: str,
-                   model_type: str, launch_number: int, save_path: str) -> None:
-
-        filename = f"{model_type}_{phase}_segmentation_epoch_{epoch}_hyperparams_{config_id}_{launch_number}.png"
-        filepath = os.path.join(save_path, filename)
-        plt.savefig(filepath, bbox_inches='tight', dpi=150)
-        plt.close()
+                   bbox_to_anchor=(0.5, -0.05), fontsize=10)
 
     def defaultColors(self) -> Dict[int, List[float]]:
         return {
-            0: [0.5, 0.5, 0.5],  # Background
-            1: [0.2, 0.8, 0.2],  # Healthy
-            2: [0.9, 0.9, 0.2],  # Partially injured
-            3: [0.9, 0.3, 0.3],  # Completely ruptured
+            0: [0.5, 0.5, 0.5],
+            1: [0.2, 0.8, 0.2],
+            2: [0.9, 0.9, 0.2],
+            3: [0.9, 0.3, 0.3],
         }

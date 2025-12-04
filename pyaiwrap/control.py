@@ -84,12 +84,13 @@ class SegmentationControlFunction(PhaseAwareControlFunction):
     """Control function for segmentation tasks."""
 
     def __init__(self, num_classes: int = 4):
-        classColors = {
+        class_colors = {
+            0: [0.5, 0.5, 0.5],    # Background
             1: [0.2, 0.8, 0.2],    # Healthy
             2: [0.9, 0.9, 0.2],    # Partially injured
             3: [0.9, 0.3, 0.3]     # Completely ruptured
         }
-        visualizer = SegmentationVisualizer(classColors)
+        visualizer = SegmentationVisualizer(class_colors)
         super().__init__(visualizer)
         self.num_classes = num_classes
 
