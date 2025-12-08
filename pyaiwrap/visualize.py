@@ -242,7 +242,7 @@ class ColorizationVisualizer(VisualizationStrategy):
                 images["original"], "RGB", input_range=ranges["original"]
             ),
             "modified": self.converter.convert(
-                images["modified"], "RGB", input_range=ranges["modified"]
+                images["modified"], "luminance", input_range=ranges["modified"]
             ),
             "reconstructed": self.converter.convert(
                 images["reconstructed"], "RGB", input_range=ranges["reconstructed"]
