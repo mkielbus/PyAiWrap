@@ -1,3 +1,4 @@
 build/**
 PyAiWrap.egg-info/**
 pyaiwrap/__pycache__/**
+venv/

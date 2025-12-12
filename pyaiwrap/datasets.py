@@ -8,6 +8,9 @@ import pandas as pd
 import numpy as np
 import pickle
 from scipy.ndimage import zoom
+from torchvision import transforms
+from PIL import Image
+
 
 
 class PairedImageFolder(Dataset):
@@ -199,3 +202,43 @@ class KneeMRISegmentationDataset(Dataset):
         resized_mask = zoom(seg_mask, (depth_factor, height_factor, width_factor), order=0)
 
         return resized_volume, resized_mask
+
+class SimpleColorizationDataset(Dataset):
+    """
+    Bardzo prosty dataset:
+    - czyta kolorowe obrazy z katalogu
+    - zwraca (input, target), gdzie:
+        input  = obraz RGB
+        target = ten sam obraz RGB
+    Model w środku sam konwertuje wejście na grayscale.
+    """
+
+    def __init__(self, root_dir: str, image_size: int = 256):
+        self.root_dir = root_dir
+        self.image_size = image_size
+
+        exts = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+        self.image_paths: List[str] = [
+            os.path.join(root_dir, f)
+            for f in os.listdir(root_dir)
+            if f.lower().endswith(exts)
+        ]
+
+        if len(self.image_paths) == 0:
+            raise RuntimeError(f"Brak obrazków w katalogu {root_dir}")
+
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),  # [3,H,W] w [0,1]
+        ])
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        path = self.image_paths[idx]
+        img = Image.open(path).convert("RGB")
+        img_tensor = self.transform(img)
+        # input = RGB (model zrobi luminancję),
+        # target = ten sam RGB (ground truth)
+        return img_tensor, img_tensor

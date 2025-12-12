@@ -1,4 +1,5 @@
 import torch
+import math
 
 
 def prepareDevice(use_cuda: bool = True, device_id: int = 0) -> torch.device:
@@ -216,3 +217,114 @@ def distancePositionalEncoding(height: int, width: int, d_model: int, device: to
     encoding[:, 1::2] = torch.cos(angle_flat * dimensions[:, 1::2] * torch.pi)
 
     return encoding.unsqueeze(0)  # [1, height*width, d_model]
+
+
+def sinusoidal_position_encoding_1d(positions: torch.Tensor, dim: int) -> torch.Tensor:
+    """
+    Klasyczne sinusoidalne kodowanie pozycyjne 1D.
+    positions: [N] – indeksy pozycji (0,1,2,...)
+    dim: wymiar wektora PE (musi być parzysty)
+    zwraca: [N, dim]
+    """
+    if dim % 2 != 0:
+        raise ValueError(f"sinusoidal_position_encoding_1d: dim musi być parzyste, a jest {dim}")
+
+    device = positions.device
+    half_dim = dim // 2
+
+    div_term = torch.exp(
+        torch.arange(0, half_dim, device=device, dtype=torch.float32)
+        * -(math.log(10000.0) / half_dim)
+    )  
+
+    
+    angles = positions.float().unsqueeze(1) * div_term.unsqueeze(0)
+
+    pe = torch.zeros(positions.size(0), dim, device=device)
+    pe[:, 0::2] = torch.sin(angles)   
+    pe[:, 1::2] = torch.cos(angles)   
+    return pe
+
+
+def sinusoidal_position_encoding_2d(height: int, width: int, dim: int, device: torch.device) -> torch.Tensor:
+    """
+    2D sinusoidalne PE (jak w ViT):
+    - połowa wymiaru koduje pozycję w pionie (y)
+    - połowa wymiaru koduje pozycję w poziomie (x)
+
+    Zwraca tensor [1, height*width, dim] – dokładnie tak jak distancePositionalEncoding.
+    """
+    if dim % 4 != 0:
+        raise ValueError(f"sinusoidal_position_encoding_2d: dim musi być podzielne przez 4, a jest {dim}")
+
+  
+    ys = torch.arange(height, device=device)
+    xs = torch.arange(width, device=device)
+    y_grid, x_grid = torch.meshgrid(ys, xs, indexing="ij")  
+
+    y_flat = y_grid.reshape(-1)
+    x_flat = x_grid.reshape(-1)
+
+    dim_h = dim // 2
+    dim_w = dim // 2
+
+    pe_y = sinusoidal_position_encoding_1d(y_flat, dim_h)  
+    pe_x = sinusoidal_position_encoding_1d(x_flat, dim_w)  
+
+    pe = torch.cat([pe_y, pe_x], dim=1)  
+    return pe.unsqueeze(0)  
+
+
+def ddcolor_position_encoding_2d(
+    height: int,
+    width: int,
+    d_model: int,
+    device: torch.device,
+    temperature: float = 10000.0,
+    normalize: bool = True,
+    scale: float = 2 * math.pi,
+) -> torch.Tensor:
+    """
+    2D sine-cosine positional encoding w stylu DETR / Mask2Former,
+    czyli taki typ kodowania, jaki używa też DDColor.
+
+    Zwraca tensor [1, height*width, d_model].
+    """
+    
+    if d_model % 4 != 0:
+        raise ValueError(
+            f"ddcolor_position_encoding_2d: d_model musi być podzielne przez 4, a jest {d_model}"
+        )
+
+    num_pos_feats = d_model // 2 
+
+    y_embed = torch.arange(height, device=device).unsqueeze(1).repeat(1, width)
+    x_embed = torch.arange(width, device=device).unsqueeze(0).repeat(height, 1)
+
+    y_embed = y_embed.float()
+    x_embed = x_embed.float()
+
+    if normalize:
+        eps = 1e-6
+        y_embed = y_embed / (height - 1 + eps) * scale
+        x_embed = x_embed / (width - 1 + eps) * scale
+
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=device)
+    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats) 
+
+    pos_x = x_embed[..., None] / dim_t
+    pos_y = y_embed[..., None] / dim_t
+
+    pos_x = torch.stack(
+        (pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()),
+        dim=-1
+    ).flatten(-2)
+
+    pos_y = torch.stack(
+        (pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()),
+        dim=-1
+    ).flatten(-2) 
+
+    pos = torch.cat([pos_y, pos_x], dim=-1)
+
+    return pos.view(1, height * width, d_model)

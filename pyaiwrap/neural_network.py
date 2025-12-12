@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import sys
 import math
 import json
-from .utils import distancePositionalEncoding
+from .utils import distancePositionalEncoding, ddcolor_position_encoding_2d
+from .utils import sinusoidal_position_encoding_2d
 
 
 class UnsupportedLayerType(Exception):
@@ -633,8 +634,11 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
         patch_h = h // patch_size
         patch_w = w // patch_size
-        grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
+        grayscale_pos_encoding = ddcolor_position_encoding_2d(
+            patch_h, patch_w, self.embed_dim, grayscale_img.device
+        )
         encoder_input = grayscale_patches + grayscale_pos_encoding
+
 
         if self.only_use_encoder:
             output_embeddings = self.transformer(
@@ -647,7 +651,11 @@ class ColorizationTransformerNet(nn.Module):
             color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
             color_patch_h = h // color_patch_size
             color_patch_w = w // color_patch_size
-            color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
+            color_pos = ddcolor_position_encoding_2d(
+                color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device
+            )  # [1, num_color_tokens, embed_dim]
+
+            # color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
             decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos  # [B, num_color_tokens, embed_dim]
 
@@ -935,7 +943,11 @@ class PixelDecoder(nn.Module):
                 h_res = h_enc
                 w_res = w_enc
 
-            pos_encoding = distancePositionalEncoding(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
+            pos_encoding = ddcolor_position_encoding_2d(
+                h_res, w_res, current_features.shape[-1], device
+            )
+
+            # pos_encoding = distancePositionalEncoding(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
             transformer_input_with_pos = transformer_input + pos_encoding
 
             transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
@@ -956,7 +968,10 @@ class PixelDecoder(nn.Module):
 
             output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
 
-            pos_encoding = distancePositionalEncoding(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, embed_dim]
+            pos_encoding = ddcolor_position_encoding_2d(
+                h_up, w_up, self.embed_dim, device
+            )
+            # pos_encoding = distancePositionalEncoding(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, embed_dim]
             output_features_projected_with_pos = output_features_projected + pos_encoding  # [batch_size, h_up*w_up, embed_dim]
             pixel_decoder_outputs.append(output_features_projected_with_pos)
 
@@ -1263,6 +1278,61 @@ class ConvAttenColorizationNetwork(nn.Module):
         initial_rgb = self._generate_color_channels(x)
         final_output = self._trainable_network(initial_rgb)
         return final_output
+
+class ConvAttenColorizationNetworkModules(nn.Module):
+    """
+    Prostsza wersja ConvAttenColorizationNetwork:
+    - przyjmuje już wytrenowane modele na kanały R, G, B jako nn.Module,
+    - skleja ich wyjścia w obraz RGB,
+    - opcjonalnie przepuszcza przez dodatkową sieć dopieszczającą.
+    """
+
+    def __init__(
+        self,
+        red_model: nn.Module,
+        green_model: nn.Module,
+        blue_model: nn.Module,
+        trainable_network: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+        self.red_model = red_model
+        self.green_model = green_model
+        self.blue_model = blue_model
+
+        # sieć dopieszczająca; jeśli nie podasz, zrobimy prostą 3-warstwową konwolucję
+        if trainable_network is None:
+            self._trainable_network = nn.Sequential(
+                nn.Conv2d(3, 64, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(64, 32, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(32, 3, kernel_size=3, padding=1),
+            )
+        else:
+            self._trainable_network = trainable_network
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, 1, H, W] – obraz w skali szarości
+        """
+        # Zakładamy, że modele kanałowe przyjmują 1-kanałowe wejście i zwracają [B,1,H,W]
+        r = self.red_model(x)
+        g = self.green_model(x)
+        b = self.blue_model(x)
+
+        # Dopasowanie rozmiarów w razie drobnych różnic
+        H, W = x.shape[-2:]
+        if r.shape[-2:] != (H, W):
+            r = F.interpolate(r, size=(H, W), mode="bicubic", align_corners=False)
+        if g.shape[-2:] != (H, W):
+            g = F.interpolate(g, size=(H, W), mode="bicubic", align_corners=False)
+        if b.shape[-2:] != (H, W):
+            b = F.interpolate(b, size=(H, W), mode="bicubic", align_corners=False)
+
+        rgb = torch.cat([r, g, b], dim=1)   # [B, 3, H, W]
+        out = self._trainable_network(rgb)  # [B, 3, H, W]
+        return out
+
 
 
 class UNetEncoderBlock(nn.Module):

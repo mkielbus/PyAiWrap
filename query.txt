@@ -1,0 +1,4 @@
+qf,IMAGE_GREYSCALE:true
+qf,TYPE:IMAGE
+qf,IMAGE_SIZE:small
+q,*
