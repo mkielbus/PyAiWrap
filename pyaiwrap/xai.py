@@ -264,34 +264,52 @@ class LIMEExplainer(XAIExplanationMethod):
     def explain(self,
                 model: nn.Module,
                 input_tensor: torch.Tensor,
-                target: Optional[torch.Tensor] = None,
-                class_idx: int = 0,
                 **kwargs) -> torch.Tensor:
         """Generate LIME explanations."""
         model.eval()
 
         if self._segmentation_mode:
-            return self._explainSegmentation(model, input_tensor, class_idx, **kwargs)
+            return self._explainSegmentation(model, input_tensor, **kwargs)
         else:
-            return self._explainClassification(model, input_tensor, target, **kwargs)
+            return self._explainClassification(model, input_tensor, **kwargs)
 
     def _explainSegmentation(self,
                              model: nn.Module,
                              input_tensor: torch.Tensor,
-                             class_idx: int,
                              **kwargs) -> torch.Tensor:
         """Explain segmentation predictions."""
 
         def forward_func(x: torch.Tensor) -> torch.Tensor:
-            """Forward function that returns logits for specific class."""
             with torch.no_grad():
                 output = model(x)
-                if output.dim() == 5:  # B x C x D x H x W
-                    return output[:, class_idx:class_idx+1, ...]
-                return output
+                probs = torch.softmax(output, dim=1)  # B x C x D x H x W
+
+                # Knee mask (non-background)
+                knee_mask = probs.argmax(dim=1) != 0  # B x D x H x W
+
+                if not knee_mask.any():
+                    return torch.tensor([[0.0]], device=x.device)
+
+                knee_pred = probs.argmax(dim=1)[knee_mask]  # Only knee voxels
+                unique, counts = torch.unique(knee_pred, return_counts=True)
+
+                if len(unique) > 0:
+                    target_class = unique[counts.argmax()].item()
+
+                    # Average probability IN KNEE REGION ONLY
+                    class_probs_in_knee = probs[:, target_class][knee_mask]
+                    avg_prob = class_probs_in_knee.mean()
+
+                    return avg_prob.unsqueeze(0).unsqueeze(1)
+                else:
+                    return torch.tensor([[0.0]], device=x.device)
 
         lime = Lime(forward_func)
 
+        # if target.dim() == 5:
+        #     target = target.squeeze(0)
+
+        # target = tuple([0, input_tensor.shape[2] - 1, input_tensor.shape[3] - 1, input_tensor.shape[4] - 1])
         attr = lime.attribute(
             input_tensor,
             n_samples=self._n_samples,
@@ -304,12 +322,10 @@ class LIMEExplainer(XAIExplanationMethod):
     def _explainClassification(self,
                                model: nn.Module,
                                input_tensor: torch.Tensor,
-                               target: Optional[torch.Tensor] = None,
                                **kwargs) -> torch.Tensor:
-        if target is None:
-            with torch.no_grad():
-                output = model(input_tensor)
-                target = output.argmax(dim=1)
+        with torch.no_grad():
+            output = model(input_tensor)
+            target = output.argmax(dim=1)
 
         lime = Lime(model)
         attr = lime.attribute(
