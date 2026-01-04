@@ -246,7 +246,6 @@ class LIMEExplainer(XAIExplanationMethod):
 
     def __init__(self,
                  n_samples: int = 100,
-                 kernel_width: float = 1.0,
                  batch_size: int = 4,
                  segmentation_mode: bool = True):
         """
@@ -257,67 +256,100 @@ class LIMEExplainer(XAIExplanationMethod):
             segmentation_mode: If True, expects 4D/5D inputs (B x C x D x H x W)
         """
         self._n_samples = n_samples
-        self._kernel_width = kernel_width
         self._batch_size = batch_size
         self._segmentation_mode = segmentation_mode
 
     def explain(self,
                 model: nn.Module,
                 input_tensor: torch.Tensor,
+                class_idx: Optional[int] = None,
                 **kwargs) -> torch.Tensor:
         """Generate LIME explanations."""
         model.eval()
 
         if self._segmentation_mode:
-            return self._explainSegmentation(model, input_tensor, **kwargs)
+            return self._explainSegmentation(model, input_tensor, class_idx, **kwargs)
         else:
             return self._explainClassification(model, input_tensor, **kwargs)
 
-    def _explainSegmentation(self,
-                             model: nn.Module,
-                             input_tensor: torch.Tensor,
-                             **kwargs) -> torch.Tensor:
-        """Explain segmentation predictions."""
+    def _explainSegmentation(self, model, input_tensor, class_idx=None, **kwargs):
+        """Complete LIME explanation for knee segmentation."""
 
-        def forward_func(x: torch.Tensor) -> torch.Tensor:
-            with torch.no_grad():
-                output = model(x)
-                probs = torch.softmax(output, dim=1)  # B x C x D x H x W
+        # 1. Determine target class ONCE
+        if class_idx is None:
+            class_idx = self._findMostCommonKneeClass(model, input_tensor)
 
-                # Knee mask (non-background)
-                knee_mask = probs.argmax(dim=1) != 0  # B x D x H x W
+        # 2. Create forward function for THIS class
+        def forward_func(x):
+            return self._getKneeClassProbabilities(model, x)
 
-                if not knee_mask.any():
-                    return torch.tensor([[0.0]], device=x.device)
+        lime = Lime(forward_func)
 
-                knee_pred = probs.argmax(dim=1)[knee_mask]  # Only knee voxels
+        attr = lime.attribute(
+            input_tensor,
+            target=class_idx,
+            n_samples=25,
+            perturbations_per_eval=1,
+            **kwargs
+        )
+
+        return attr
+
+    def _findMostCommonKneeClass(self, model, input_tensor):
+        """Find most common non-background class (called ONCE)."""
+        with torch.no_grad():
+            output = model(input_tensor)
+            probs = torch.softmax(output, dim=1)
+
+            knee_mask = probs.argmax(dim=1) != 0
+
+            if knee_mask.any():
+                knee_pred = probs.argmax(dim=1)[knee_mask]
                 unique, counts = torch.unique(knee_pred, return_counts=True)
 
                 if len(unique) > 0:
                     target_class = unique[counts.argmax()].item()
 
-                    # Average probability IN KNEE REGION ONLY
-                    class_probs_in_knee = probs[:, target_class][knee_mask]
-                    avg_prob = class_probs_in_knee.mean()
+                    return target_class
 
-                    return avg_prob.unsqueeze(0).unsqueeze(1)
-                else:
-                    return torch.tensor([[0.0]], device=x.device)
+        return 0
 
-        lime = Lime(forward_func)
+    def _getKneeClassProbabilities(self, model, x, num_classes=None):
+        """Get probabilities for ALL classes in knee region."""
+        with torch.no_grad():
+            output = model(x)
+            probs = torch.softmax(output, dim=1)  # B x C x D x H x W
 
-        # if target.dim() == 5:
-        #     target = target.squeeze(0)
+            if num_classes is None:
+                num_classes = probs.shape[1]
 
-        # target = tuple([0, input_tensor.shape[2] - 1, input_tensor.shape[3] - 1, input_tensor.shape[4] - 1])
-        attr = lime.attribute(
-            input_tensor,
-            n_samples=self._n_samples,
-            perturbations_per_eval=self._batch_size,
-            **kwargs
-        )
+            # Knee mask (non-background)
+            knee_mask = probs.argmax(dim=1) != 0  # B x D x H x W
 
-        return attr
+            if not knee_mask.any():
+                # No knee tissue - return zeros for all classes
+                return torch.zeros((x.shape[0], num_classes), device=x.device)
+
+            # For EACH class, compute average probability in knee region
+            batch_results = []
+            for b in range(x.shape[0]):
+                class_probs = []
+                for c in range(num_classes):
+                    # Get probabilities for this class in knee region
+                    class_probs_in_knee = probs[b, c][knee_mask[b]]
+
+                    if class_probs_in_knee.numel() > 0:
+                        avg_prob = class_probs_in_knee.mean()
+                    else:
+                        avg_prob = torch.tensor(0.0, device=x.device)
+
+                    class_probs.append(avg_prob)
+
+                # Shape: [num_classes]
+                batch_results.append(torch.stack(class_probs))
+
+            # Result: B x C tensor
+            return torch.stack(batch_results, dim=0)
 
     def _explainClassification(self,
                                model: nn.Module,
