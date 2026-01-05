@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from datetime import datetime
-from captum.attr import Lime
+from captum.attr import Lime, Saliency
 
 ActivationDict = Dict[str, torch.Tensor]
 LayerNameList = List[str]
@@ -241,7 +241,72 @@ class XAIExplanationMethod(ABC):
         pass
 
 
-class LIMEExplainer(XAIExplanationMethod):
+class KneeMRIDatasetExplainer(XAIExplanationMethod):
+    """Base class for explainers tailored to knee MRI datasets."""
+
+    def _findMostCommonKneeClass(self, model, input_tensor):
+        """Find most common non-background class (called ONCE)."""
+        with torch.no_grad():
+            output = model(input_tensor)
+            probs = torch.softmax(output, dim=1)
+
+            knee_mask = probs.argmax(dim=1) != 0
+
+            if knee_mask.any():
+                knee_pred = probs.argmax(dim=1)[knee_mask]
+                unique, counts = torch.unique(knee_pred, return_counts=True)
+
+                if len(unique) > 0:
+                    target_class = unique[counts.argmax()].item()
+
+                    return target_class
+
+        return 0
+
+    def _getKneeClassProbabilities(self, model, x, num_classes=None, use_gradients: bool = False):
+        """Get probabilities for ALL classes in knee region."""
+        if use_gradients:
+            return self._getProbabilities(model, x, num_classes)
+        with torch.no_grad():
+            return self._getProbabilities(model, x, num_classes)
+
+    def _getProbabilities(self, model, x, num_classes=None):
+        output = model(x)
+        probs = torch.softmax(output, dim=1)  # B x C x D x H x W
+
+        if num_classes is None:
+            num_classes = probs.shape[1]
+
+        # Knee mask (non-background)
+        knee_mask = probs.argmax(dim=1) != 0  # B x D x H x W
+
+        if not knee_mask.any():
+            # No knee tissue - return zeros for all classes
+            return torch.zeros((x.shape[0], num_classes), device=x.device)
+
+        # For EACH class, compute average probability in knee region
+        batch_results = []
+        for b in range(x.shape[0]):
+            class_probs = []
+            for c in range(num_classes):
+                # Get probabilities for this class in knee region
+                class_probs_in_knee = probs[b, c][knee_mask[b]]
+
+                if class_probs_in_knee.numel() > 0:
+                    avg_prob = class_probs_in_knee.mean()
+                else:
+                    avg_prob = torch.tensor(0.0, device=x.device)
+
+                class_probs.append(avg_prob)
+
+            # Shape: [num_classes]
+            batch_results.append(torch.stack(class_probs))
+
+        # Result: B x C tensor
+        return torch.stack(batch_results, dim=0)
+
+
+class LIMEExplainer(KneeMRIDatasetExplainer):
     """LIME explanation for medical image segmentation."""
 
     def __init__(self,
@@ -288,68 +353,12 @@ class LIMEExplainer(XAIExplanationMethod):
         attr = lime.attribute(
             input_tensor,
             target=class_idx,
-            n_samples=25,
-            perturbations_per_eval=1,
+            n_samples=self._n_samples,
+            perturbations_per_eval=self._batch_size,
             **kwargs
         )
 
         return attr
-
-    def _findMostCommonKneeClass(self, model, input_tensor):
-        """Find most common non-background class (called ONCE)."""
-        with torch.no_grad():
-            output = model(input_tensor)
-            probs = torch.softmax(output, dim=1)
-
-            knee_mask = probs.argmax(dim=1) != 0
-
-            if knee_mask.any():
-                knee_pred = probs.argmax(dim=1)[knee_mask]
-                unique, counts = torch.unique(knee_pred, return_counts=True)
-
-                if len(unique) > 0:
-                    target_class = unique[counts.argmax()].item()
-
-                    return target_class
-
-        return 0
-
-    def _getKneeClassProbabilities(self, model, x, num_classes=None):
-        """Get probabilities for ALL classes in knee region."""
-        with torch.no_grad():
-            output = model(x)
-            probs = torch.softmax(output, dim=1)  # B x C x D x H x W
-
-            if num_classes is None:
-                num_classes = probs.shape[1]
-
-            # Knee mask (non-background)
-            knee_mask = probs.argmax(dim=1) != 0  # B x D x H x W
-
-            if not knee_mask.any():
-                # No knee tissue - return zeros for all classes
-                return torch.zeros((x.shape[0], num_classes), device=x.device)
-
-            # For EACH class, compute average probability in knee region
-            batch_results = []
-            for b in range(x.shape[0]):
-                class_probs = []
-                for c in range(num_classes):
-                    # Get probabilities for this class in knee region
-                    class_probs_in_knee = probs[b, c][knee_mask[b]]
-
-                    if class_probs_in_knee.numel() > 0:
-                        avg_prob = class_probs_in_knee.mean()
-                    else:
-                        avg_prob = torch.tensor(0.0, device=x.device)
-
-                    class_probs.append(avg_prob)
-
-                # Shape: [num_classes]
-                batch_results.append(torch.stack(class_probs))
-
-            # Result: B x C tensor
-            return torch.stack(batch_results, dim=0)
 
     def _explainClassification(self,
                                model: nn.Module,
@@ -372,6 +381,67 @@ class LIMEExplainer(XAIExplanationMethod):
 
     def getName(self) -> str:
         return f"LIMEExplainer(n_samples={self._n_samples})"
+
+
+class SaliencyExplainer(KneeMRIDatasetExplainer):
+    """Saliency explanation for medical image segmentation using Captum."""
+
+    def __init__(self,
+                 absolute: bool = True):
+        """
+        Args:
+            absolute: If True, return absolute values of gradients
+            smooth_grad: If True, use SmoothGrad to reduce noise
+            n_samples: Number of samples for SmoothGrad
+            stdevs: Standard deviation for noise in SmoothGrad
+        """
+        self._absolute = absolute
+
+    def explain(self,
+                model: nn.Module,
+                input_tensor: torch.Tensor,
+                target_class: Optional[int] = None,
+                **kwargs) -> torch.Tensor:
+        """Generate saliency explanations for segmentation."""
+        model.eval()
+
+        # Determine target class if not provided
+        if target_class is None:
+            target_class = self._findMostCommonKneeClass(model, input_tensor)
+
+        def forward_func(x):
+            return self._getKneeClassProbabilities(model, x, use_gradients=True)
+
+        saliency = Saliency(forward_func)
+
+        attr = saliency.attribute(
+            input_tensor,
+            target=target_class,
+            abs=self._absolute,
+            **kwargs
+        )
+
+        return attr
+
+    def _explainClassification(self,
+                               model: nn.Module,
+                               input_tensor: torch.Tensor,
+                               target: Optional[torch.Tensor] = None,
+                               **kwargs) -> torch.Tensor:
+        """Saliency for classification models (fallback)."""
+        saliency = Saliency(model)
+
+        if target is None:
+            with torch.no_grad():
+                output = model(input_tensor)
+                target = output.argmax(dim=1)
+
+        attr = saliency.attribute(input_tensor, target=target, abs=self._absolute **kwargs)
+
+        return attr
+
+    def getName(self) -> str:
+        return f"SaliencyExplainer(absolute={self._absolute})"
 
 
 class XAIManager:
