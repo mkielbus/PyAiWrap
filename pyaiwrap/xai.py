@@ -7,7 +7,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from datetime import datetime
-from captum.attr import Lime, Saliency
+from captum.attr import Lime, Saliency, LayerGradCam, LayerAttribution
+import torch.nn.functional as F
 
 ActivationDict = Dict[str, torch.Tensor]
 LayerNameList = List[str]
@@ -442,6 +443,64 @@ class SaliencyExplainer(KneeMRIDatasetExplainer):
 
     def getName(self) -> str:
         return f"SaliencyExplainer(absolute={self._absolute})"
+
+
+class GradCAMExplainer(KneeMRIDatasetExplainer):
+
+    def __init__(self,
+                 layer_name: Optional[str] = None):
+        self._layer_name = layer_name
+
+    def explain(self,
+                model: nn.Module,
+                input_tensor: torch.Tensor,
+                target_class: Optional[int] = None,
+                **kwargs) -> torch.Tensor:
+        model.eval()
+
+        if target_class is None:
+            target_class = self._findMostCommonKneeClass(model, input_tensor)
+
+        target_layer = self._findConvLayer(model, self._layer_name)
+        if target_layer is None:
+            raise ValueError("No conv layer for Grad-CAM")
+
+        def forward_func(x):
+            return self._getKneeClassProbabilities(model, x, use_gradients=True)
+
+        grad_cam = LayerGradCam(forward_func, target_layer[1])
+
+        attr = grad_cam.attribute(
+            input_tensor,
+            target=target_class,
+            **kwargs
+        )
+
+        attr = LayerAttribution.interpolate(attr, input_tensor.shape[2:])
+        attr = F.relu(attr)
+
+        return attr.detach()
+
+    def _findConvLayer(self, model, layer_name=None):
+        conv_layers = []
+
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                conv_layers.append((name, module))
+
+        if not conv_layers:
+            return None
+
+        if layer_name:
+            for name, module in conv_layers:
+                if name == layer_name:
+                    return (name, module)
+
+        return conv_layers[-1]
+
+    def getName(self) -> str:
+        layer_info = f"layer={self._layer_name}" if self._layer_name else "last-conv"
+        return f"GradCAMExplainer({layer_info})"
 
 
 class XAIManager:
