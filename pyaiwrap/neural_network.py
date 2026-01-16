@@ -52,7 +52,8 @@ class DownsamplingBlock(nn.Module):
         super().__init__()
         self.downsampling_convolution = nn.Conv2d(
             input_channels, output_channels,
-            kernel_size=4, stride=2, padding=1
+            kernel_size=4, stride=2, padding=1,
+            bias=False
         )
         self.batch_normalization = nn.BatchNorm2d(output_channels)
         self.activation = nn.LeakyReLU(0.2, inplace=True)
@@ -75,7 +76,8 @@ class UpsamplingBlock(nn.Module):
         super().__init__()
         self.upsampling_convolution = nn.ConvTranspose2d(
             input_channels, output_channels,
-            kernel_size=4, stride=2, padding=1
+            kernel_size=4, stride=2, padding=1,
+            bias=False
         )
         self.batch_normalization = nn.BatchNorm2d(output_channels)
         self.activation = nn.ReLU(inplace=True)
@@ -156,12 +158,12 @@ class MultiHeadAttention(nn.Module):
         self.scale = math.sqrt(self.head_dim)
 
         # Separate projections for Q, K, V (can have different input dimensions)
-        self.query_projection = nn.Linear(self.query_dim, self.embed_dim)
-        self.key_projection = nn.Linear(self.key_dim, self.embed_dim)
-        self.value_projection = nn.Linear(self.value_dim, self.embed_dim)
+        self.query_projection = nn.Linear(self.query_dim, self.embed_dim, bias=False)
+        self.key_projection = nn.Linear(self.key_dim, self.embed_dim, bias=False)
+        self.value_projection = nn.Linear(self.value_dim, self.embed_dim, bias=False)
 
         # Output projection (project back to query dimension)
-        self.output_projection = nn.Linear(self.embed_dim, query_dim)
+        self.output_projection = nn.Linear(self.embed_dim, query_dim, bias=True)
 
         self.attention_dropout = nn.Dropout(dropout)
         self.output_dropout = nn.Dropout(dropout)
@@ -428,13 +430,22 @@ class PatchUpsample(nn.Module):
     def forward(self, x):
         # [B, num_patches, embed_dim]
         B, num_patches, embed_dim = x.shape
-        h = w = int(num_patches ** 0.5)  # patches are squares of pixels
+
+        h = int(num_patches ** 0.5)
+        if h * h != num_patches:
+            raise ValueError(
+                f"num_patches={num_patches} is not a perfect square, cannot reshape tokens to (h,w)."
+            )
+        w = h
+
         # [B, embed_dim, h, w]
-        x = x.transpose(1, 2)  # [B, embed_dim, num_patches]
-        x = x.view(B, embed_dim, h, w)  # [B, embed_dim, h, w]
+        x = x.transpose(1, 2).contiguous()  # [B, embed_dim, num_patches]
+        x = x.view(B, embed_dim, h, w)      # [B, embed_dim, h, w]
+
         # [B, out_channels, h*patch_size, w*patch_size]
         x = self.proj(x)
         return x
+
 
 
 class TransformerNet(nn.Module):
@@ -748,22 +759,42 @@ class NeuralNetwork(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self._layers(x)
 
-
-def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.Module] = None) -> nn.Module:
-    layers = []
-    for layer_config in architecture:
-        layer_type = layer_config["type"]
-        params = layer_config.get("params", {})
-
+    def _resolve_layer_class(layer_type: str, custom_module: Optional[nn.Module] = None):
         if custom_module and hasattr(custom_module, layer_type):
-            layer_class = getattr(custom_module, layer_type)
-        elif custom_module and layer_type in globals():
-            layer_class = globals()[layer_type]
-        else:
-            layer_class = getattr(nn, layer_type)
+            return getattr(custom_module, layer_type)
+        if layer_type in globals():
+            return globals()[layer_type]
+        if hasattr(nn, layer_type):
+            return getattr(nn, layer_type)
+        raise UnsupportedLayerType(layer_type)
 
-        layers.append(layer_class(**params))
-    return nn.Sequential(*layers)
+
+    def buildModuleFromConfig(cfg: Dict[str, Any], custom_module: Optional[nn.Module] = None) -> nn.Module:
+        layer_type = cfg["type"]
+
+        # kontener zagnieżdżony
+        if layer_type == "Sequential":
+            children = [buildModuleFromConfig(child, custom_module) for child in cfg.get("layers", [])]
+            return nn.Sequential(*children)
+
+        params = cfg.get("params", {})
+        layer_class = _resolve_layer_class(layer_type, custom_module)
+
+        try:
+            return layer_class(**params)
+        except TypeError as e:
+            msg = str(e)
+            if "unexpected keyword argument" in msg:
+                bad = msg.split("'")[1]
+                raise NotSupportedLayerConstructorParam(layer_type, bad) from e
+            raise
+
+
+    def createLayersFromConfig(architecture: List[Dict[str, Any]], custom_module: Optional[nn.Module] = None) -> nn.Module:
+        # wspieramy zarówno listę warstw, jak i pojedynczy root moduł
+        if isinstance(architecture, dict):
+            return buildModuleFromConfig(architecture, custom_module)
+        return nn.Sequential(*[buildModuleFromConfig(x, custom_module) for x in architecture])
 
 
 class LuminanceEncoder(nn.Module):
@@ -823,16 +854,16 @@ class LuminanceEncoder(nn.Module):
         except Exception as e:
             raise RuntimeError(f"Failed to load encoder from {config_path}: {e}")
 
-    def forward(self, x: torch.Tensor) -> tuple[List[torch.Tensor], torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         self.feature_outputs.clear()
         current = x
 
         if not isinstance(self.layers, nn.Sequential):
-            if hasattr(self.layers, 'forward') and self.layers.forward.__code__.co_argcount == 1:
-                result = self.layers(x)
-                if result and isinstance(result, list):
-                    return result
-            raise ValueError("Custom encoder module must return feature_outputs list.")
+            result = self.layers(x)
+            if isinstance(result, list) and all(isinstance(t, torch.Tensor) for t in result):
+                return result
+            raise ValueError("Custom encoder must return List[torch.Tensor].")
+
 
         for layer in self.layers:
             is_downsample = False
@@ -1000,33 +1031,33 @@ class MultiScaleColorDecoder(nn.Module):
                     query_dim=color_dim,
                     key_dim=embed_dim,
                     value_dim=embed_dim,
-                    embed_dim=embed_dim,
+                    embed_dim=color_dim,
                     num_heads=num_heads,
                     dropout=dropout,
                     use_causal_mask=False
                 ),
-                'norm1': nn.LayerNorm(embed_dim),
+                'norm1': nn.LayerNorm(color_dim),
                 'self_attention': MultiHeadAttention(
                     query_dim=color_dim,
                     key_dim=None,
                     value_dim=None,
-                    embed_dim=embed_dim,
+                    embed_dim=color_dim,
                     num_heads=num_heads,
                     dropout=dropout,
                     use_causal_mask=False
                 ),
-                'norm2': nn.LayerNorm(embed_dim),
+                'norm2': nn.LayerNorm(color_dim),
                 'mlp': nn.Sequential(
-                    nn.Linear(embed_dim, embed_dim * mlp_ratio),
+                    nn.Linear(color_dim, color_dim * mlp_ratio),
                     nn.GELU(),
                     nn.Dropout(dropout),
-                    nn.Linear(embed_dim * mlp_ratio, embed_dim),
+                    nn.Linear(color_dim * mlp_ratio, color_dim),
                     nn.Dropout(dropout)
                 ),
-                'norm3': nn.LayerNorm(embed_dim)
+                'norm3': nn.LayerNorm(color_dim)
             })
             self.decoder_blocks.append(decoder_block)
-        self._final_projection = nn.Linear(embed_dim, output_dim)
+        self._final_projection = nn.Linear(color_dim, output_dim)
 
     def forward(self, pixel_decoder_outputs: List[torch.Tensor]) -> torch.Tensor:
         batch_size = pixel_decoder_outputs[0].shape[0]
@@ -1519,7 +1550,7 @@ class PatchEmbedding3D(nn.Module):
 class DWConv3D(nn.Module):
     def __init__(self, dim=768):
         super().__init__()
-        self.dwconv = nn.Conv3d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+        self.dwconv = nn.Conv3d(dim, dim, 3, 1, 1, bias=False, groups=dim)
         self.bn = nn.BatchNorm3d(dim)
 
     def forward(self, x, spatial_dims):

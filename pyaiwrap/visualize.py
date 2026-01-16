@@ -73,10 +73,16 @@ class ImageConverter:
         """RGB passes through unchanged."""
         return images
 
+    # def _convertLuminance(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
+    #     """Convert luminance to grayscale RGB."""
+    #     factor = 1.0 if input_range == "zero_one" else 1.0 / 100.0
+    #     return (images * factor).repeat(1, 3, 1, 1)
+
     def _convertLuminance(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
-        """Convert luminance to grayscale RGB."""
-        factor = 1.0 if input_range == "zero_one" else 1.0 / 100.0
-        return (images * factor).repeat(1, 3, 1, 1)
+        if input_range == "kornia":
+            images = images / 100.0
+        return images.clamp(0, 1).repeat(1, 3, 1, 1)
+
 
     def _convertAb(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
         """Convert AB channels to false-color RGB."""
@@ -110,7 +116,10 @@ class ImageConverter:
 
     def _convertDefault(self, images: torch.Tensor, channel_type: str, input_range: str) -> torch.Tensor:
         """Default conversion for unknown channel types."""
-        return images.repeat(1, 3, 1, 1)
+        if images.shape[1] == 1:
+            return images.repeat(1, 3, 1, 1)
+        return images 
+
 
 
 class RangeDetector:
@@ -119,12 +128,12 @@ class RangeDetector:
     @staticmethod
     def detect(images: torch.Tensor, channel_type: str) -> str:
         """Detect if images are in [0,1] range or Kornia's native range."""
-        if channel_type in ["LAB", "AB", "luminance"]:
+        if channel_type in ["LAB", "AB", "luminance", "RGB"]:
             if images.min() >= 0 and images.max() <= 1:
                 return "zero_one"
-            else:
-                return "kornia"
+            return "kornia" 
         return "zero_one"
+
 
 
 class ColorizationVisualizer(VisualizationStrategy):
@@ -205,17 +214,20 @@ class ColorizationVisualizer(VisualizationStrategy):
         modified = images["modified"]
         modified_range = ranges["modified"]
 
-        l_channel = modified * 100.0 if modified_range == "zero_one" else modified
+       if modified_range == "kornia":
+            l_channel = modified / 100.0
+       else:
+            l_channel = modified
 
         return {
             "original": self.converter.convert(
                 images["original"], "AB", paired_images=l_channel,
-                input_range=ranges["original"]
+                input_range="zero_one"   # wymuszamy spójny zakres dla pary
             ),
             "modified": self.converter.convert(modified, "luminance", input_range=modified_range),
             "reconstructed": self.converter.convert(
                 images["reconstructed"], "AB", paired_images=l_channel,
-                input_range=ranges["reconstructed"]
+                input_range="zero_one"
             )
         }
 
@@ -312,10 +324,10 @@ class MaskColorizer:
 
 class SegmentationVisualizer(VisualizationStrategy):
 
-    def __init__(self, class_colors: Dict[int, List[float]] = None):
+    def __init__(self, class_colors: Optional[Dict[int, List[float]]] = None):
         self.mask_finder = MaskCenterFinder()
-        self.colorizer = MaskColorizer(class_colors or self.defaultColors())
-        self.class_colors = class_colors
+        self.class_colors = class_colors or self.defaultColors()
+        self.colorizer = MaskColorizer(self.class_colors)
 
     def visualize(self, volumes: torch.Tensor, true_masks: torch.Tensor,
                   pred_logits: torch.Tensor, epoch: int, save_path: str,
