@@ -156,9 +156,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = math.sqrt(self.head_dim)
 
         # Separate projections for Q, K, V (can have different input dimensions)
-        self.query_projection = nn.Linear(self.query_dim, self.embed_dim)
-        self.key_projection = nn.Linear(self.key_dim, self.embed_dim)
-        self.value_projection = nn.Linear(self.value_dim, self.embed_dim)
+        self.query_projection = nn.Linear(self.query_dim, self.embed_dim, bias=False)
+        self.key_projection = nn.Linear(self.key_dim, self.embed_dim, bias=False)
+        self.value_projection = nn.Linear(self.value_dim, self.embed_dim, bias=False)
 
         # Output projection (project back to query dimension)
         self.output_projection = nn.Linear(self.embed_dim, query_dim)
