@@ -161,7 +161,7 @@ class MultiHeadAttention(nn.Module):
         self.value_projection = nn.Linear(self.value_dim, self.embed_dim, bias=False)
 
         # Output projection (project back to query dimension)
-        self.output_projection = nn.Linear(self.embed_dim, query_dim)
+        self.output_projection = nn.Linear(self.embed_dim, query_dim, bias=False)
 
         self.attention_dropout = nn.Dropout(dropout)
         self.output_dropout = nn.Dropout(dropout)
