@@ -77,18 +77,43 @@ def train(
     current_patience = 0
     best_val_metric = None
     early_stopping_triggered = False
+    start_epoch = 0
 
     os.makedirs(weights_path, exist_ok=True)
     os.makedirs(diagrams_path, exist_ok=True)
 
+    checkpoint_path = os.path.join(weights_path, f"{model_type}_training_state_hyperparams_{config_id}.pth")
+
     for model_name, model in models.items():
         model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{config_id}.pth")
+
         if os.path.exists(model_path):
             print(f"Loading existing weights for {model_name} from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
         else:
             print(f"No existing weights found for {model_name} at {model_path}. Starting fresh training.")
+
         model.to(device)
+
+    if os.path.exists(checkpoint_path):
+        print(f"Loading training state from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        for model_name, optimizer in optimizers.items():
+            if model_name in checkpoint['optimizers']:
+                optimizer.load_state_dict(checkpoint['optimizers'][model_name])
+                print(f"Loaded optimizer state for {model_name}")
+
+        if schedulers is not None:
+            for model_name, scheduler in schedulers.items():
+                if model_name in checkpoint.get('schedulers', {}):
+                    scheduler.load_state_dict(checkpoint['schedulers'][model_name])
+                    print(f"Loaded scheduler state for {model_name}")
+
+        start_epoch = checkpoint.get('epoch', 0)
+        best_val_metric = checkpoint.get('best_val_metric', None)
+        current_patience = checkpoint.get('current_patience', 0)
+        print(f"Resuming training from epoch {start_epoch}")
 
     first_batch_train = next(iter(train_loader))
     first_batch_val = next(iter(validation_loader))
@@ -97,8 +122,8 @@ def train(
     first_batch_val = tuple(item.to(device) if isinstance(item, torch.Tensor) else item for item in first_batch_val)
 
     epoch_iterator = tqdm(
-            range(num_epochs),
-            total=num_epochs,
+            range(start_epoch, num_epochs),
+            total=num_epochs - start_epoch,
             desc="Epochs passed",
             leave=False,
             position=0
@@ -186,9 +211,22 @@ def train(
                 )
 
         metrics.save(diagrams_data_path, config_id, model_type, launch_number)
+
         for model_name, model in models.items():
             model_path = os.path.join(weights_path, f"{model_type}_{model_name}_hyperparams_{config_id}.pth")
             torch.save(model.state_dict(), model_path)
+
+        checkpoint = {
+            'epoch': epoch + 1,
+            'best_val_metric': best_val_metric,
+            'current_patience': current_patience,
+            'optimizers': {name: optimizer.state_dict() for name, optimizer in optimizers.items()}
+        }
+
+        if schedulers is not None:
+            checkpoint['schedulers'] = {name: scheduler.state_dict() for name, scheduler in schedulers.items()}
+
+        torch.save(checkpoint, checkpoint_path)
 
         val_metric = metrics.getMetric(epoch + 1, 'val', early_stopping_metric)
 
@@ -196,8 +234,21 @@ def train(
             best_val_metric = val_metric
             current_patience = 0
             for model_name, model in models.items():
-                model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{config_id}.pth")
-                torch.save(model.state_dict(), model_path)
+                best_model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{config_id}.pth")
+                torch.save(model.state_dict(), best_model_path)
+
+            best_checkpoint = {
+                'epoch': epoch + 1,
+                'best_val_metric': best_val_metric,
+                'current_patience': current_patience,
+                'optimizers': {name: optimizer.state_dict() for name, optimizer in optimizers.items()}
+            }
+
+            if schedulers is not None:
+                best_checkpoint['schedulers'] = {name: scheduler.state_dict() for name, scheduler in schedulers.items()}
+
+            best_checkpoint_path = os.path.join(weights_path, f"best_performance_{model_type}_training_state_hyperparams_{config_id}.pth")
+            torch.save(best_checkpoint, best_checkpoint_path)
         else:
             current_patience += 1
 
