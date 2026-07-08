@@ -1,7 +1,9 @@
+import copy
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 import os
+from itertools import islice
 from typing import Any, Dict, Callable, Optional, Tuple
 from .metrics import Metrics
 
@@ -26,7 +28,9 @@ def train(
     model_type: str = "generator",
     gradient_clip: Optional[float] = 1.0,
     control_fn: Optional[Callable] = None,
-    early_stopping_metric: str = "loss"
+    early_stopping_metric: str = "loss",
+    control_train_batch_number: int = 0,
+    control_val_batch_number: int = 0
 ) -> Dict[str, Any]:
     """
     Generic training function for generator models with support for multiple models.
@@ -70,6 +74,8 @@ def train(
                                                              model_type: str,
                                                              launch_number: int) -> None
         early_stopping_metric (str): Name of metric to use for early stopping (default: "loss").
+        control_train_batch_number (int): Index of the train batch passed to control_fn (default: 0).
+        control_val_batch_number (int): Index of the validation batch passed to control_fn (default: 0).
 
     Returns:
         Dict[str, Any]: Dictionary containing metrics object and training information.
@@ -115,11 +121,24 @@ def train(
         current_patience = checkpoint.get('current_patience', 0)
         print(f"Resuming training from epoch {start_epoch}")
 
-    first_batch_train = next(iter(train_loader))
-    first_batch_val = next(iter(validation_loader))
+    if control_train_batch_number >= len(train_loader):
+        raise ValueError(f"control_train_batch_number ({control_train_batch_number}) is out of range "
+                         f"for train_loader with {len(train_loader)} batches")
+    if control_val_batch_number >= len(validation_loader):
+        raise ValueError(f"control_val_batch_number ({control_val_batch_number}) is out of range "
+                         f"for validation_loader with {len(validation_loader)} batches")
 
-    first_batch_train = tuple(item.to(device) if isinstance(item, torch.Tensor) else item for item in first_batch_train)
-    first_batch_val = tuple(item.to(device) if isinstance(item, torch.Tensor) else item for item in first_batch_val)
+    control_batch_train = next(islice(iter(train_loader), control_train_batch_number, None))
+    control_batch_val = next(islice(iter(validation_loader), control_val_batch_number, None))
+
+    control_batch_train = tuple(
+        item.detach().clone().to(device) if isinstance(item, torch.Tensor) else copy.deepcopy(item)
+        for item in control_batch_train
+    )
+    control_batch_val = tuple(
+        item.detach().clone().to(device) if isinstance(item, torch.Tensor) else copy.deepcopy(item)
+        for item in control_batch_val
+    )
 
     epoch_iterator = tqdm(
             range(start_epoch, num_epochs),
@@ -201,8 +220,8 @@ def train(
             with torch.no_grad():
                 control_fn(
                     models=models,
-                    train_batch=first_batch_train,
-                    val_batch=first_batch_val,
+                    train_batch=control_batch_train,
+                    val_batch=control_batch_val,
                     epoch=epoch + 1,
                     diagrams_path=diagrams_path,
                     config_id=config_id,
