@@ -452,7 +452,8 @@ class GeneratorColorizationLoss:
             lpips_net: Network to use for LPIPS ('alex', 'vgg', 'squeeze') (default: 'alex')
             device: Device to place LPIPS network on
             input_channel: Type of input channel ("RGB", "R", "G", "B", "LAB", "AB", "luminance")
-            target_channel: Type of target channel ("RGB", "R", "G", "B", "LAB", "AB", "luminance")
+            target_channel: Type of target channel ("RGB", "R", "G", "B", "LAB", "AB",
+                            "LAB_A", "LAB_B", "luminance")
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.recon_weight = recon_weight
@@ -598,6 +599,26 @@ class GeneratorColorizationLoss:
         elif self.target_channel == "LAB":
             # Full LAB to RGB
             return labToRgbForVisualization(images)
+        elif self.target_channel in ("LAB_A", "LAB_B"):
+            # Single A or B channel, normalized to [0,1] by ExtractLABChannel
+            ab_channel = images * 254.0 - 127.0
+
+            if self.input_channel == "luminance" and modified.shape[1] == 1:
+                # Use modified (L) as luminance
+                l_channel = modified * 100.0  # L: [0,1] -> [0,100]
+            elif self.input_channel == "RGB" and modified.shape[1] == 3:
+                l_channel = self._rgb_to_luminance(modified) * 100.0
+            else:
+                # Fallback: use middle-gray L
+                l_channel = torch.ones_like(ab_channel) * 50.0  # [0,100] range
+
+            zeros = torch.zeros_like(ab_channel)
+            if self.target_channel == "LAB_A":
+                ab_channels = torch.cat([ab_channel, zeros], dim=1)
+            else:
+                ab_channels = torch.cat([zeros, ab_channel], dim=1)
+
+            return labToRgb(l_channel, ab_channels)
         elif self.target_channel == "R":
             return torch.cat([images, torch.zeros_like(images), torch.zeros_like(images)], dim=1)
         elif self.target_channel == "G":

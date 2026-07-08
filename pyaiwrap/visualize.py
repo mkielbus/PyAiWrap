@@ -35,6 +35,10 @@ class ImageConverter:
                 input_range: str = "zero_one") -> torch.Tensor:
         """Convert images to RGB using dispatch pattern."""
 
+        if channel_type in ("LAB_A", "LAB_B"):
+            rgb = self._convertLabChannel(images, channel_type, paired_images, input_range)
+            return self._ensureBatchDimension(rgb)
+
         if self._isLAbPair(images, paired_images):
             rgb = self._convertLAbPair(images, paired_images, input_range)
             return self._ensureBatchDimension(rgb)
@@ -66,6 +70,29 @@ class ImageConverter:
         if input_range == "zero_one":
             l_channel = l_channel * 100.0
             ab_channels = ab_channels * 254.0 - 127.0
+
+        return labToRgb(l_channel, ab_channels)
+
+    def _convertLabChannel(self, images: torch.Tensor, channel_type: str,
+                           paired_images: Optional[torch.Tensor],
+                           input_range: str) -> torch.Tensor:
+        """Convert a single A or B channel to RGB, using paired L channel if available.
+
+        paired_images (if given) must be an L channel already in Kornia's [0, 100] range.
+        """
+        if input_range == "zero_one":
+            images = images * 254.0 - 127.0
+
+        if paired_images is not None:
+            l_channel = paired_images
+        else:
+            l_channel = torch.full_like(images, 50.0)
+
+        zeros = torch.zeros_like(images)
+        if channel_type == "LAB_A":
+            ab_channels = torch.cat([images, zeros], dim=1)
+        else:
+            ab_channels = torch.cat([zeros, images], dim=1)
 
         return labToRgb(l_channel, ab_channels)
 
@@ -119,7 +146,7 @@ class RangeDetector:
     @staticmethod
     def detect(images: torch.Tensor, channel_type: str) -> str:
         """Detect if images are in [0,1] range or Kornia's native range."""
-        if channel_type in ["LAB", "AB", "luminance"]:
+        if channel_type in ["LAB", "AB", "LAB_A", "LAB_B", "luminance"]:
             if images.min() >= 0 and images.max() <= 1:
                 return "zero_one"
             else:
@@ -143,6 +170,9 @@ class ColorizationVisualizer(VisualizationStrategy):
 
         for channel in ["R", "G", "B"]:
             self.conversion_strategies[("luminance", channel)] = self._convertSingleChannel
+
+        for channel in ["LAB_A", "LAB_B"]:
+            self.conversion_strategies[("luminance", channel)] = self._convertLuminanceAndLabChannel
 
         self.default_strategy = self._convertGeneral
 
@@ -194,7 +224,7 @@ class ColorizationVisualizer(VisualizationStrategy):
 
         strategy_key = (input_channel, target_channel)
         strategy = self.conversion_strategies.get(strategy_key, self.default_strategy)
-        if target_channel in ("R", "G", "B"):
+        if target_channel in ("R", "G", "B", "LAB_A", "LAB_B"):
             return strategy(images, ranges, input_channel, target_channel)
         else:
             return strategy(images, ranges)
@@ -215,6 +245,27 @@ class ColorizationVisualizer(VisualizationStrategy):
             "modified": self.converter.convert(modified, "luminance", input_range=modified_range),
             "reconstructed": self.converter.convert(
                 images["reconstructed"], "AB", paired_images=l_channel,
+                input_range=ranges["reconstructed"]
+            )
+        }
+
+    def _convertLuminanceAndLabChannel(self, images: Dict[str, torch.Tensor],
+                                       ranges: Dict[str, str],
+                                       input_channel: str, target_channel: str) -> Dict[str, torch.Tensor]:
+        """Strategy for L -> single A or B channel extraction."""
+        modified = images["modified"]
+        modified_range = ranges["modified"]
+
+        l_channel = modified * 100.0 if modified_range == "zero_one" else modified
+
+        return {
+            "original": self.converter.convert(
+                images["original"], target_channel, paired_images=l_channel,
+                input_range=ranges["original"]
+            ),
+            "modified": self.converter.convert(modified, "luminance", input_range=modified_range),
+            "reconstructed": self.converter.convert(
+                images["reconstructed"], target_channel, paired_images=l_channel,
                 input_range=ranges["reconstructed"]
             )
         }

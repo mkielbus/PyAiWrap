@@ -365,6 +365,69 @@ class ExtractABChannels(ImageTransform):
         return f"{self.__class__.__name__}(num_output_channels={self.num_output_channels})"
 
 
+class ExtractLABChannel(ImageTransform):
+    """Extract a single A or B channel from LAB color space, normalized to [0, 1]"""
+
+    def __init__(self, channel_index: int, num_output_channels: int = 1):
+        """
+        Initialize single LAB channel extraction.
+
+        IMPORTANT: Expects input to already be in LAB color space with Kornia's ranges:
+        L: [0, 100], A: [-127, 127], B: [-127, 127]
+
+        The extracted channel is normalized from [-127, 127] to [0, 1] so it can be
+        regressed directly by networks with a sigmoid output.
+
+        Args:
+            channel_index: Index of channel to extract (1=A, 2=B)
+            num_output_channels: Number of output channels (1 or 3)
+        """
+        super().__init__()
+        if channel_index not in [1, 2]:
+            raise ValueError("channel_index must be 1 (A) or 2 (B)")
+        if num_output_channels not in [1, 3]:
+            raise ValueError("num_output_channels must be 1 or 3")
+        self.channel_index = channel_index
+        self.num_output_channels = num_output_channels
+
+    def __call__(self, img):
+        """Extract a single A or B channel from LAB tensor"""
+        if isinstance(img, torch.Tensor):
+            return self._handleTensor(img)
+        else:
+            raise TypeError("ExtractLABChannel expects LAB tensor input. Use RGBToLAB transform first.")
+
+    def _handleTensor(self, lab_tensor):
+        """Extract the channel from LAB tensor and normalize to [0, 1]"""
+        if lab_tensor.dim() != 3:
+            raise ValueError(f"Input tensor must have 3 dimensions, got {lab_tensor.dim()}")
+
+        if lab_tensor.shape[0] != 3:
+            raise ValueError(f"Input tensor must have 3 channels (LAB), got {lab_tensor.shape[0]}")
+
+        channel = lab_tensor[self.channel_index:self.channel_index + 1, :, :]
+        channel = (channel + 127.0) / 254.0
+
+        return channel.repeat(3, 1, 1) if self.num_output_channels == 3 else channel
+
+    def __repr__(self):
+        channel_names = {1: 'A', 2: 'B'}
+        return (f"{self.__class__.__name__}(channel={channel_names[self.channel_index]}, "
+                f"num_output_channels={self.num_output_channels})")
+
+
+class ExtractLABAChannel(ExtractLABChannel):
+    """Extract A channel from LAB color space, normalized to [0, 1]"""
+    def __init__(self, num_output_channels: int = 1):
+        super().__init__(channel_index=1, num_output_channels=num_output_channels)
+
+
+class ExtractLABBChannel(ExtractLABChannel):
+    """Extract B channel from LAB color space, normalized to [0, 1]"""
+    def __init__(self, num_output_channels: int = 1):
+        super().__init__(channel_index=2, num_output_channels=num_output_channels)
+
+
 class ExtractABChannelsTo3Channel(ImageTransform):
     """Extract A and B channels and create 3-channel LAB tensor with zeros in L channel"""
 
@@ -458,6 +521,8 @@ class ChannelType(Enum):
     LAB = "LAB"
     AB = "AB"
     AB_TO_3CH = "ab_to_3ch"
+    LAB_A = "LAB_A"
+    LAB_B = "LAB_B"
     LUMINANCE = "luminance"
     R = "R"
     G = "G"
@@ -508,6 +573,24 @@ class ABTo3ChannelTransformCreator(TransformCreator):
         ])
 
 
+class LABAChannelTransformCreator(TransformCreator):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            RGBToLAB(),
+            ExtractLABAChannel(num_output_channels=output_channels)
+        ])
+
+
+class LABBChannelTransformCreator(TransformCreator):
+    def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            RGBToLAB(),
+            ExtractLABBChannel(num_output_channels=output_channels)
+        ])
+
+
 class LuminanceTransformCreator(TransformCreator):
     def createTransform(self, image_size: int, output_channels: int, is_input: bool = True) -> transforms.Compose:
         if not is_input:
@@ -554,6 +637,8 @@ class ChannelTransformFactory:
         ChannelType.LAB: LABTransformCreator(),
         ChannelType.AB: ABTransformCreator(),
         ChannelType.AB_TO_3CH: ABTo3ChannelTransformCreator(),
+        ChannelType.LAB_A: LABAChannelTransformCreator(),
+        ChannelType.LAB_B: LABBChannelTransformCreator(),
         ChannelType.LUMINANCE: LuminanceTransformCreator(),
         ChannelType.R: RedChannelTransformCreator(),
         ChannelType.G: GreenChannelTransformCreator(),
@@ -568,4 +653,4 @@ class ChannelTransformFactory:
             creator = cls._creators[channel_enum]
             return creator.createTransform(image_size, output_channels, is_input)
         except (KeyError, ValueError):
-            raise ValueError(f"channel_type must be 'luminance', 'R', 'G', 'B', or 'RGB', got '{channel_type}'")
+            raise ValueError(f"channel_type must be one of {[c.value for c in ChannelType]}, got '{channel_type}'")
