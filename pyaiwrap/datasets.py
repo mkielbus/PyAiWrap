@@ -1,6 +1,8 @@
 import os
 from torch.utils.data import Dataset
 from torchvision.datasets import ImageFolder
+from torchvision import transforms
+from PIL import Image
 import torch
 import random
 from typing import List, Tuple, Optional
@@ -10,12 +12,35 @@ import pickle
 from scipy.ndimage import zoom
 
 
+class EdgesDataset(Dataset):
+    def __init__(self, edges_filepaths: List[str], resize_transform: Optional[transforms.Resize]):
+        """
+        edges_filepaths: paths to single-channel edge images, ordered to match the paired image dataset
+        resize_transform: the resize applied to the paired input images, so edges stay aligned with them
+        """
+
+        self._edges_filepaths = edges_filepaths
+        edge_transforms = [resize_transform] if resize_transform is not None else []
+        edge_transforms += [transforms.Grayscale(num_output_channels=1), transforms.ToTensor()]
+        self._transform = transforms.Compose(edge_transforms)
+
+    def __len__(self):
+        return len(self._edges_filepaths)
+
+    def __getitem__(self, idx):
+        edges_img = Image.open(self._edges_filepaths[idx])
+        return self._transform(edges_img)
+
+
 class PairedImageFolder(Dataset):
-    def __init__(self, images_folder_path, input_transform, target_transform):
+    def __init__(self, images_folder_path, input_transform, target_transform,
+                 segmentation_pairing: Optional[str] = None):
         """
         images_folder_path: path to folder with images
         modification_transform: transform applied to modified images
         resize_transform: transform applied to real images
+        segmentation_pairing: optional path to a csv with header image_filepath,edges_filepath pairing
+            each image with its edges image; when given, edges are stacked onto the input image channels
         """
 
         self._input_dataset = ImageFolder(images_folder_path, transform=input_transform)
@@ -26,6 +51,42 @@ class PairedImageFolder(Dataset):
 
         # Verify that pairs correspond
         self._verify_pairs()
+
+        self._edges_dataset = None
+        if segmentation_pairing is not None:
+            self._edges_dataset = self._buildEdgesDataset(segmentation_pairing, input_transform)
+
+    def _buildEdgesDataset(self, segmentation_pairing: str, input_transform) -> EdgesDataset:
+        """Build an edges dataset ordered like _input_dataset from the pairing csv"""
+
+        pairing = pd.read_csv(segmentation_pairing)
+        edges_by_filename = {
+            os.path.basename(image_path): edges_path
+            for image_path, edges_path in zip(pairing['image_filepath'], pairing['edges_filepath'])
+        }
+
+        edges_filepaths = []
+        for image_path, _ in self._input_dataset.samples:
+            filename = os.path.basename(image_path)
+            if filename not in edges_by_filename:
+                raise ValueError(
+                    f"No edges entry in {segmentation_pairing} for image {image_path}"
+                )
+            edges_filepaths.append(edges_by_filename[filename])
+
+        return EdgesDataset(edges_filepaths, self._findResizeTransform(input_transform))
+
+    @staticmethod
+    def _findResizeTransform(input_transform) -> Optional[transforms.Resize]:
+        """Extract the resize step from the input transform so edges are resized the same way"""
+
+        if isinstance(input_transform, transforms.Resize):
+            return input_transform
+        if isinstance(input_transform, transforms.Compose):
+            for transform in input_transform.transforms:
+                if isinstance(transform, transforms.Resize):
+                    return transform
+        return None
 
     def _verify_pairs(self):
         """Verify that modified_dataset[i] and real_dataset[i] are the same image"""
@@ -50,6 +111,10 @@ class PairedImageFolder(Dataset):
     def __getitem__(self, idx):
         modified_img, modified_label = self._input_dataset[idx]
         real_img, real_label = self._target_dataset[idx]
+
+        if self._edges_dataset is not None:
+            edges_img = self._edges_dataset[idx]
+            modified_img = torch.cat([modified_img, edges_img], dim=0)
 
         return modified_img, real_img, modified_label, real_label
 
