@@ -600,8 +600,8 @@ class GeneratorColorizationLoss:
             # Full LAB to RGB
             return labToRgbForVisualization(images)
         elif self.target_channel in ("LAB_A", "LAB_B"):
-            # Single A or B channel, normalized to [0,1] by ExtractLABChannel
-            ab_channel = images * 254.0 - 127.0
+            # Single A or B channel in Kornia's native [-127,127] range
+            ab_channel = images
 
             if self.input_channel == "luminance" and modified.shape[1] == 1:
                 # Use modified (L) as luminance

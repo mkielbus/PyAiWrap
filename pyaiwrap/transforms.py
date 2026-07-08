@@ -366,7 +366,7 @@ class ExtractABChannels(ImageTransform):
 
 
 class ExtractLABChannel(ImageTransform):
-    """Extract a single A or B channel from LAB color space, normalized to [0, 1]"""
+    """Extract a single A or B channel from LAB color space - expects LAB input in Kornia's ranges"""
 
     def __init__(self, channel_index: int, num_output_channels: int = 1):
         """
@@ -375,8 +375,8 @@ class ExtractLABChannel(ImageTransform):
         IMPORTANT: Expects input to already be in LAB color space with Kornia's ranges:
         L: [0, 100], A: [-127, 127], B: [-127, 127]
 
-        The extracted channel is normalized from [-127, 127] to [0, 1] so it can be
-        regressed directly by networks with a sigmoid output.
+        The extracted channel keeps Kornia's native [-127, 127] range, so the
+        regressing network must have an unbounded output (no sigmoid).
 
         Args:
             channel_index: Index of channel to extract (1=A, 2=B)
@@ -398,7 +398,7 @@ class ExtractLABChannel(ImageTransform):
             raise TypeError("ExtractLABChannel expects LAB tensor input. Use RGBToLAB transform first.")
 
     def _handleTensor(self, lab_tensor):
-        """Extract the channel from LAB tensor and normalize to [0, 1]"""
+        """Extract the channel from LAB tensor in Kornia's native range"""
         if lab_tensor.dim() != 3:
             raise ValueError(f"Input tensor must have 3 dimensions, got {lab_tensor.dim()}")
 
@@ -406,7 +406,6 @@ class ExtractLABChannel(ImageTransform):
             raise ValueError(f"Input tensor must have 3 channels (LAB), got {lab_tensor.shape[0]}")
 
         channel = lab_tensor[self.channel_index:self.channel_index + 1, :, :]
-        channel = (channel + 127.0) / 254.0
 
         return channel.repeat(3, 1, 1) if self.num_output_channels == 3 else channel
 
@@ -417,13 +416,13 @@ class ExtractLABChannel(ImageTransform):
 
 
 class ExtractLABAChannel(ExtractLABChannel):
-    """Extract A channel from LAB color space, normalized to [0, 1]"""
+    """Extract A channel from LAB color space in Kornia's native range"""
     def __init__(self, num_output_channels: int = 1):
         super().__init__(channel_index=1, num_output_channels=num_output_channels)
 
 
 class ExtractLABBChannel(ExtractLABChannel):
-    """Extract B channel from LAB color space, normalized to [0, 1]"""
+    """Extract B channel from LAB color space in Kornia's native range"""
     def __init__(self, num_output_channels: int = 1):
         super().__init__(channel_index=2, num_output_channels=num_output_channels)
 
