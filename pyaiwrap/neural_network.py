@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Callable, Optional
+from typing import Any, Dict, List, Callable, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1215,23 +1215,39 @@ class VAE(nn.Module):
 
 
 class ConvAttenColorizationNetwork(nn.Module):
+    # Ordered channel layouts: concatenation order defines the output channel order
+    # (R, G, B for an RGB image, A, B for LAB chroma channels)
+    _SUPPORTED_MODEL_SETS = (
+        ("red_model", "green_model", "blue_model"),
+        ("a_model", "b_model"),
+    )
+
     def __init__(
         self,
         pretrained_models_config: Dict[str, Dict[str, str]],
         trainable_network: nn.Module,  # Generic trainable network
+        pretrained_input_channels: int = 1,
     ):
         super().__init__()
 
-        required_models = {"red_model", "green_model", "blue_model"}
-        if not required_models.issubset(pretrained_models_config.keys()):
-            raise ValueError(f"Required models: {required_models}")
+        self._color_model_names = self._resolve_model_names(pretrained_models_config.keys())
 
         self._pretrained_models_config = pretrained_models_config
+        self._pretrained_input_channels = pretrained_input_channels
 
         self._pretrained_models = nn.ModuleDict()
         self._load_pretrained_models()
 
         self._trainable_network = trainable_network
+
+    def _resolve_model_names(self, configured_models) -> List[str]:
+        for model_set in self._SUPPORTED_MODEL_SETS:
+            if set(model_set).issubset(configured_models):
+                return list(model_set)
+        raise ValueError(
+            f"Configured models {set(configured_models)} must include one of: "
+            f"{[set(model_set) for model_set in self._SUPPORTED_MODEL_SETS]}"
+        )
 
     def _load_pretrained_models(self):
         for model_name, model_config in self._pretrained_models_config.items():
@@ -1249,27 +1265,32 @@ class ConvAttenColorizationNetwork(nn.Module):
             except Exception as e:
                 raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
+    def _separate_edges(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Split off edge channels stacked after the channels the pretrained models expect"""
+        if x.size(1) <= self._pretrained_input_channels:
+            return x, None
+        return x[:, :self._pretrained_input_channels], x[:, self._pretrained_input_channels:]
+
     def _generate_color_channels(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, _, height, width = x.shape
+        height, width = x.shape[-2:]
 
         with torch.no_grad():
-            red_channel = self._pretrained_models["red_model"](x)    # [B, 1, H, W]
-            green_channel = self._pretrained_models["green_model"](x)  # [B, 1, H, W]
-            blue_channel = self._pretrained_models["blue_model"](x)   # [B, 1, H, W]
+            color_channels = [self._pretrained_models[name](x) for name in self._color_model_names]
 
-        if red_channel.shape[-2:] != (height, width):
-            red_channel = nn.functional.interpolate(red_channel, size=(height, width), mode='bicubic')
-        if green_channel.shape[-2:] != (height, width):
-            green_channel = nn.functional.interpolate(green_channel, size=(height, width), mode='bicubic')
-        if blue_channel.shape[-2:] != (height, width):
-            blue_channel = nn.functional.interpolate(blue_channel, size=(height, width), mode='bicubic')
+        color_channels = [
+            nn.functional.interpolate(channel, size=(height, width), mode='bicubic')
+            if channel.shape[-2:] != (height, width) else channel
+            for channel in color_channels
+        ]
 
-        rgb_image = torch.cat([red_channel, green_channel, blue_channel], dim=1)  # [B, 3, H, W]
-        return rgb_image
+        return torch.cat(color_channels, dim=1)  # [B, num_models, H, W]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        initial_rgb = self._generate_color_channels(x)
-        final_output = self._trainable_network(initial_rgb)
+        model_input, edges = self._separate_edges(x)
+        initial_colors = self._generate_color_channels(model_input)
+        if edges is not None:
+            initial_colors = torch.cat([initial_colors, edges], dim=1)
+        final_output = self._trainable_network(initial_colors)
         return final_output
 
 
