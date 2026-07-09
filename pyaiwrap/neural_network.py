@@ -570,7 +570,7 @@ class ColorizationTransformerNet(nn.Module):
                  num_image_patches: int = 4096,
                  image_size: int = 256,
                  use_decoder_masking: bool = False,
-                 only_use_encoder: bool = False,
+                 only_use_encoder: bool = True,
                  output_channels: int = 3):
         super().__init__()
 
