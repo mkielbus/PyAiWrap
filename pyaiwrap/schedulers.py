@@ -78,18 +78,18 @@ class ExponentialCreator(SchedulerCreator):
 
 
 class MultiStepCreator(SchedulerCreator):
-    """Factory for iteration-based MultiStepLR."""
+    """Factory for epoch-based MultiStepLR (train() steps schedulers once per epoch)."""
     def createScheduler(self, optimizer, config: Config):
 
         milestone_list = []
-        decay_start = config["DECAY_START_ITER"]
-        decay_step = config["DECAY_STEP_ITER"]
-        max_iters = config["MAX_ITERS"]
+        decay_start = config["DECAY_START_EPOCH"]
+        decay_step = config["DECAY_STEP_EPOCHS"]
+        max_epochs = config["EPOCHS"]
 
-        current_iter = decay_start
-        while current_iter < max_iters:
-            milestone_list.append(current_iter)
-            current_iter += decay_step
+        current_epoch = decay_start
+        while current_epoch < max_epochs:
+            milestone_list.append(current_epoch)
+            current_epoch += decay_step
 
         return torch.optim.lr_scheduler.MultiStepLR(
             optimizer,

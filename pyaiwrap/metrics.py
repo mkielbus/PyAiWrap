@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Any, Dict, List
+import copy
 import json
 import os
 import numpy as np
@@ -87,7 +88,9 @@ class BaseMetrics(Metrics):
 
             metrics_dict = {'epoch': epoch}
             for key in self.metric_keys:
-                metrics_dict[key] = np.mean(phase_data[key])
+                # plain float, not np.float64: checkpoints holding these values must
+                # stay loadable under torch.load(weights_only=True) (torch >= 2.6 default)
+                metrics_dict[key] = float(np.mean(phase_data[key]))
 
             self._history[phase].append(metrics_dict)
             self._current_epoch_metrics[phase] = metrics_dict
@@ -136,6 +139,14 @@ class BaseMetrics(Metrics):
 
         with open(filepath, 'w') as f:
             json.dump(metrics_data, f, indent=2)
+
+    def getState(self) -> Dict[str, Any]:
+        """Serializable state for checkpointing (the finalized per-epoch history)"""
+        return {'history': copy.deepcopy(self._history)}
+
+    def setState(self, state: Dict[str, Any]) -> None:
+        """Restore state produced by getState, e.g. when resuming from a checkpoint"""
+        self._history = copy.deepcopy(state['history'])
 
     def getHistoryLists(self) -> Dict[str, List[float]]:
         """

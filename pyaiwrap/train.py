@@ -119,6 +119,11 @@ def train(
         start_epoch = checkpoint.get('epoch', 0)
         best_val_metric = checkpoint.get('best_val_metric', None)
         current_patience = checkpoint.get('current_patience', 0)
+
+        if 'metrics_state' in checkpoint and hasattr(metrics, 'setState'):
+            metrics.setState(checkpoint['metrics_state'])
+            print("Loaded metrics history")
+
         print(f"Resuming training from epoch {start_epoch}")
 
     if control_train_batch_number >= len(train_loader):
@@ -249,6 +254,9 @@ def train(
         if schedulers is not None:
             checkpoint['schedulers'] = {name: scheduler.state_dict() for name, scheduler in schedulers.items()}
 
+        if hasattr(metrics, 'getState'):
+            checkpoint['metrics_state'] = metrics.getState()
+
         torch.save(checkpoint, checkpoint_path)
 
         val_metric = metrics.getMetric(epoch + 1, 'val', early_stopping_metric)
@@ -269,6 +277,9 @@ def train(
 
             if schedulers is not None:
                 best_checkpoint['schedulers'] = {name: scheduler.state_dict() for name, scheduler in schedulers.items()}
+
+            if hasattr(metrics, 'getState'):
+                best_checkpoint['metrics_state'] = metrics.getState()
 
             best_checkpoint_path = os.path.join(weights_path, f"best_performance_{model_type}_training_state_hyperparams_{config_id}.pth")
             torch.save(best_checkpoint, best_checkpoint_path)

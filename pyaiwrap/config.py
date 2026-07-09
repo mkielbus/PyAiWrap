@@ -497,10 +497,9 @@ class MultiStepSchedulerrConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "SCHEDULER_TYPE": "multi_step",
-            "DECAY_START_ITER": 80000,
-            "DECAY_STEP_ITER": 40000,
+            "DECAY_START_EPOCH": 40,
+            "DECAY_STEP_EPOCHS": 20,
             "DECAY_FACTOR": 0.5,
-            "MAX_ITERS": 400000,
         }
 
     def getCategory(self) -> ConfigCategory:
