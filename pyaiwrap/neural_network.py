@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import sys
 import math
 import json
-from .utils import distancePositionalEncoding
+from .utils import sinusoidalPositionalEncoding2D
 
 
 class UnsupportedLayerType(Exception):
@@ -571,7 +571,8 @@ class ColorizationTransformerNet(nn.Module):
                  image_size: int = 256,
                  use_decoder_masking: bool = False,
                  only_use_encoder: bool = True,
-                 output_channels: int = 3):
+                 output_channels: int = 3,
+                 scale_embeddings: bool = True):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -580,6 +581,9 @@ class ColorizationTransformerNet(nn.Module):
         self.only_use_encoder = only_use_encoder
         self.num_color_tokens = num_color_tokens
         self.image_size = image_size
+        # sqrt(d_model) embedding scaling from Attention Is All You Need, section 3.4
+        self.embedding_scale = math.sqrt(embed_dim) if scale_embeddings else 1.0
+        self.embedding_dropout = nn.Dropout(dropout)
 
         patch_size = image_size // int(num_image_patches ** 0.5)
         self.grayscale_embed = PatchEmbed(
@@ -633,8 +637,8 @@ class ColorizationTransformerNet(nn.Module):
         grayscale_patches = self.grayscale_embed(grayscale_img)  # [B, num_patches, embed_dim]
         patch_h = h // patch_size
         patch_w = w // patch_size
-        grayscale_pos_encoding = distancePositionalEncoding(patch_h, patch_w, self.embed_dim, grayscale_img.device)
-        encoder_input = grayscale_patches + grayscale_pos_encoding
+        grayscale_pos_encoding = sinusoidalPositionalEncoding2D(patch_h, patch_w, self.embed_dim, grayscale_img.device)
+        encoder_input = self.embedding_dropout(grayscale_patches * self.embedding_scale + grayscale_pos_encoding)
 
         if self.only_use_encoder:
             output_embeddings = self.transformer(
@@ -647,9 +651,10 @@ class ColorizationTransformerNet(nn.Module):
             color_embeddings = self.color_embedding(color_indices)  # [num_color_tokens, embed_dim]
             color_patch_h = h // color_patch_size
             color_patch_w = w // color_patch_size
-            color_pos = distancePositionalEncoding(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
+            color_pos = sinusoidalPositionalEncoding2D(color_patch_h, color_patch_w, self.embed_dim, grayscale_img.device)  # [num_color_tokens, embed_dim]
 
-            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) + color_pos  # [B, num_color_tokens, embed_dim]
+            decoder_input = color_embeddings.unsqueeze(0).repeat(batch_size, 1, 1) * self.embedding_scale + color_pos
+            decoder_input = self.embedding_dropout(decoder_input)  # [B, num_color_tokens, embed_dim]
 
             output_embeddings = self.transformer(
                 encoder_input=encoder_input,
@@ -936,7 +941,7 @@ class PixelDecoder(nn.Module):
                 h_res = h_enc
                 w_res = w_enc
 
-            pos_encoding = distancePositionalEncoding(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
+            pos_encoding = sinusoidalPositionalEncoding2D(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
             transformer_input_with_pos = transformer_input + pos_encoding
 
             transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
@@ -957,7 +962,7 @@ class PixelDecoder(nn.Module):
 
             output_features_projected = self.output_projections[i](output_features_with_embed)  # [batch_size, h_up*w_up, embed_dim]
 
-            pos_encoding = distancePositionalEncoding(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, embed_dim]
+            pos_encoding = sinusoidalPositionalEncoding2D(h_up, w_up, self.embed_dim, device)  # [1, h_up*w_up, D]
             output_features_projected_with_pos = output_features_projected + pos_encoding  # [batch_size, h_up*w_up, embed_dim]
             pixel_decoder_outputs.append(output_features_projected_with_pos)
 

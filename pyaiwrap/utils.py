@@ -27,24 +27,30 @@ def prepareDevice(use_cuda: bool = True, device_id: int = 0) -> torch.device:
     return device
 
 
-def distancePositionalEncoding(height: int, width: int, d_model: int, device: torch.device):
-    """2D positional encoding based on distance from center"""
-    y_coords = torch.linspace(-1, 1, height, device=device)
-    x_coords = torch.linspace(-1, 1, width, device=device)
+def sinusoidalPositionalEncoding2D(height: int, width: int, d_model: int, device: torch.device):
+    """
+    Standard 2D sinusoidal positional encoding (as in MAE/ViT): half the channels
+    encode the y coordinate and half the x coordinate, each half using sin/cos pairs
+    with the geometric frequency ladder from "Attention Is All You Need"
+    (wavelengths from 2*pi to 10000*2*pi over integer grid positions).
+    """
+    if d_model % 4 != 0:
+        raise ValueError(f"d_model ({d_model}) must be divisible by 4 for 2D sinusoidal encoding")
+
+    num_frequencies = d_model // 4
+    omega = torch.arange(num_frequencies, device=device).float() / num_frequencies
+    omega = 1.0 / (10000 ** omega)  # [d_model/4]
+
+    y_coords = torch.arange(height, device=device).float()
+    x_coords = torch.arange(width, device=device).float()
     y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
 
-    distance = torch.sqrt(y_grid**2 + x_grid**2)  # [height, width]
-    angle = torch.atan2(y_grid, x_grid)  # [height, width]
+    y_angles = y_grid.reshape(-1, 1) * omega  # [height*width, d_model/4]
+    x_angles = x_grid.reshape(-1, 1) * omega  # [height*width, d_model/4]
 
-    distance_flat = distance.reshape(-1, 1)  # [height*width, 1]
-    angle_flat = angle.reshape(-1, 1)        # [height*width, 1]
-
-    dimensions = torch.arange(d_model, device=device).float().unsqueeze(0)  # [1, d_model]
-
-    encoding = torch.zeros(height * width, d_model, device=device)
-
-    encoding[:, 0::2] = torch.sin(distance_flat * dimensions[:, 0::2] * torch.pi)
-
-    encoding[:, 1::2] = torch.cos(angle_flat * dimensions[:, 1::2] * torch.pi)
+    encoding = torch.cat([
+        torch.sin(y_angles), torch.cos(y_angles),
+        torch.sin(x_angles), torch.cos(x_angles)
+    ], dim=1)  # [height*width, d_model]
 
     return encoding.unsqueeze(0)  # [1, height*width, d_model]
