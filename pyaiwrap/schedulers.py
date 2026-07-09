@@ -39,12 +39,12 @@ class CosineWarmRestartsCreator(SchedulerCreator):
 class OneCycleCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         learningRate = config["LEARNING_RATE"]
-        trainingDatasetSize = config["TRAINING_DATASET_SIZE"]
+        # total_steps is in epochs because train() steps schedulers once per epoch,
+        # not once per batch
         return torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=learningRate * config["MAX_LR_MULTIPLIER"],
-            epochs=config["EPOCHS"],
-            steps_per_epoch=trainingDatasetSize,
+            total_steps=config["EPOCHS"],
             pct_start=config["PCT_START"],
             div_factor=config["DIV_FACTOR"],
             final_div_factor=config["FINAL_DIV_FACTOR"]
