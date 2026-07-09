@@ -614,7 +614,7 @@ class ColorizationTransformerNet(nn.Module):
             output_dim=embed_dim,
             use_decoder_masking=use_decoder_masking,
             only_use_encoder=only_use_encoder,
-            use_layerwise_connections=True
+            use_layerwise_connections=False
         )
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
