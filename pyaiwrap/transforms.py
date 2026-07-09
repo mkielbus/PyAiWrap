@@ -473,7 +473,9 @@ def labToRgb(lChannel, abChannels):
     Returns:
         RGB tensor in [0,1] range
     """
-    # Ensure proper dimensions
+    # Only strip the batch dimension if it was added here, so batched
+    # size-1 inputs keep their rank (loss/LPIPS expect 4D in -> 4D out)
+    added_batch_dim = lChannel.dim() == 3
     if lChannel.dim() == 3:
         lChannel = lChannel.unsqueeze(0)
     if abChannels.dim() == 3:
@@ -484,8 +486,7 @@ def labToRgb(lChannel, abChannels):
 
     rgb = kornia.color.lab_to_rgb(lab)
 
-    # Remove batch dimension if needed
-    if rgb.shape[0] == 1:
+    if added_batch_dim:
         rgb = rgb.squeeze(0)
 
     return rgb
@@ -503,12 +504,13 @@ def labToRgbForVisualization(labTensor):
     Returns:
         RGB tensor in range [0, 1]
     """
-    if labTensor.dim() == 3:
+    added_batch_dim = labTensor.dim() == 3
+    if added_batch_dim:
         labTensor = labTensor.unsqueeze(0)
 
     rgb = kornia.color.lab_to_rgb(labTensor)
 
-    if rgb.shape[0] == 1:
+    if added_batch_dim:
         rgb = rgb.squeeze(0)
 
     return rgb

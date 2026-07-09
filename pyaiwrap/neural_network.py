@@ -1245,6 +1245,13 @@ class ConvAttenColorizationNetwork(nn.Module):
 
         self._trainable_network = trainable_network
 
+    def train(self, mode: bool = True):
+        # Frozen pretrained submodules must stay in eval mode so their
+        # dropout/normalization layers behave identically in train and val phases
+        super().train(mode)
+        self._pretrained_models.eval()
+        return self
+
     def _resolve_model_names(self, configured_models) -> List[str]:
         for model_set in self._SUPPORTED_MODEL_SETS:
             if set(model_set).issubset(configured_models):

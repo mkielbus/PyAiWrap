@@ -140,6 +140,10 @@ def train(
         for item in control_batch_val
     )
 
+    # If resuming a run that already reached num_epochs, the loop below never
+    # executes; `epoch` should be defined so the return statement works
+    epoch = start_epoch - 1
+
     epoch_iterator = tqdm(
             range(start_epoch, num_epochs),
             total=num_epochs - start_epoch,
