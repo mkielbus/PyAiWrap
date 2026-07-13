@@ -1300,6 +1300,10 @@ class ConvAttenColorizationNetwork(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         model_input, edges = self._separate_edges(x)
         initial_colors = self._generate_color_channels(model_input)
+        if "a_model" in self._color_model_names:
+            # Chroma-only (a, b) predictions need luminance stacked back on top so the
+            # trainable network sees full LAB, not just chroma
+            initial_colors = torch.cat([model_input, initial_colors], dim=1)
         if edges is not None:
             initial_colors = torch.cat([initial_colors, edges], dim=1)
         final_output = self._trainable_network(initial_colors)
