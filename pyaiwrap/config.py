@@ -265,6 +265,11 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
         return {
             "DATA_TYPE": "colorization",
             "BATCH_SIZE": 1,
+            # DataLoader worker processes. The target-side augmentations (chroma jitter, cluster
+            # version remap) run on the CPU per sample, so too few workers starves the GPU;
+            # default 2 preserves the historical behaviour. Sensible upper bound is the machine's
+            # core count minus one or two.
+            "NUM_WORKERS": 2,
             "TRAIN_DATA_PATH": "./data/DIV2K_train_LR_bicubic/X4",
             "VALIDATION_DATA_PATH": "./data/DIV2K_valid_LR_bicubic/X4",
             "IMAGE_RESIZE": 256,
