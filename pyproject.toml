@@ -13,9 +13,9 @@ dependencies = [
     "pandas>=2.2.3",
     "pillow==12.0.0",
     "tqdm==4.67.1",
-    "numpy>=1.26.0,<2.0.0",
+    "numpy>=2.1.0",
     "opencv-python>=4.10.0",
-    "scikit-image==0.22.0",
+    "scikit-image>=0.24.0",
     "python-docx==1.1.0",
     "lpips==0.1.4",
     "kornia==0.8.2",
@@ -30,6 +30,11 @@ classifiers = [
     "Programming :: Developers"
 ]
 urls = {Homepage = "https://github.com/mkielbus/AI-in-Computer-Graphics-Labs"}
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0"
+]
 
 [build-system]
 requires = ["setuptools", "wheel"]

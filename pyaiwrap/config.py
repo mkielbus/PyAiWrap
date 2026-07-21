@@ -271,7 +271,36 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
             "INPUT_CHANNEL": "RGB",
             "OUTPUT_CHANNELS": 3,
             "TARGET_CHANNEL": "RGB",
-            "TARGET_OUTPUT_CHANNELS": 3
+            "TARGET_OUTPUT_CHANNELS": 3,
+            # Paired geometric augmentation (train only; applied once per image and
+            # shared by the input and target transforms). AUGMENT off keeps the
+            # deterministic-resize behaviour unchanged.
+            "AUGMENT": False,
+            "AUG_FLIP_P": 0.5,
+            "AUG_CROP_SCALE_MIN": 0.6,
+            # Target-side chroma jitter (L5a). AUG_CHROMA_P = 0 disables it, leaving the
+            # target unchanged; > 0 scales LAB chroma within the dataset's empirical band.
+            # min 1.0 keeps it always additive (never desaturating); max 1.5 stays well
+            # inside the p98 band for the vast majority of images (~12% clamped).
+            "AUG_CHROMA_P": 0.0,
+            "AUG_CHROMA_MIN": 1.0,
+            "AUG_CHROMA_MAX": 1.5,
+            # Target-side cluster-version remap (L5b): recolour an image to another colour
+            # version observed in its own semantic cluster. AUG_REMAP_P = 0 disables it. Needs
+            # the Phase 0 analysis artifacts; images missing from them are passed through, so a
+            # wrong/missing path degrades to "no augmentation" rather than to corrupt targets.
+            # Enable AUGMENT alongside it: target augmentations run after the shared geometric
+            # crop, so with AUGMENT on the remap costs ~2 ms/sample instead of ~92 ms full-res.
+            # Colours the cluster keeps fixed (sky blue, an all-green backdrop) are frozen by
+            # the planner, and whole clusters rejected in the QA pass are blacklisted there.
+            "AUG_REMAP_P": 0.0,
+            "AUG_REMAP_VERSION_INVENTORY": "",
+            "AUG_REMAP_COLOR_SV": "",
+            "AUG_REMAP_IMAGE_VERSIONS": "",
+            "AUG_REMAP_CLUSTER_NAMES": "",
+            # None -> the planner's reviewed defaults (freeze 0.50, support 10).
+            "AUG_REMAP_FREEZE_THRESHOLD": None,
+            "AUG_REMAP_MIN_SUPPORT": None
         }
 
     def getCategory(self) -> ConfigCategory:

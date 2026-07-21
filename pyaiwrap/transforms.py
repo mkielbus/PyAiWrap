@@ -1,11 +1,15 @@
+import random
+
 import torch
 import torchvision.transforms.functional as TF
 import kornia
+import cv2
 from torchvision import transforms
 from PIL import Image
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Dict
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Tuple
 from enum import Enum
 
 
@@ -27,6 +31,36 @@ class ImageTransform(ABC):
     def _handlePil(self, img):
         """Override in subclass to handle PIL input"""
         raise NotImplementedError
+
+
+class PathAwareImageTransform(ABC):
+    """A transform whose parameters depend on WHICH image it is given, not just its pixels.
+
+    The cluster-version remap is the motivating case: the correspondence it applies is chosen
+    from the source image's cluster and colour version, so it must be told the file the image
+    came from. Kept separate from ImageTransform (rather than making every transform take a
+    path) so plain photometric transforms stay usable anywhere; PairedImageFolder dispatches on
+    the type, and ComposedTargetAugmentation lets the two kinds be chained.
+    """
+
+    @abstractmethod
+    def __call__(self, img: Image.Image, image_path: str) -> Image.Image:
+        pass
+
+
+class ComposedTargetAugmentation(PathAwareImageTransform):
+    """Chain target-side augmentations, passing the image path to those that need it."""
+
+    def __init__(self, augmentations: List[Callable]) -> None:
+        self.augmentations: List[Callable] = augmentations
+
+    def __call__(self, img: Image.Image, image_path: str) -> Image.Image:
+        for augmentation in self.augmentations:
+            if isinstance(augmentation, PathAwareImageTransform):
+                img = augmentation(img, image_path)
+            else:
+                img = augmentation(img)
+        return img
 
 
 class ToGrayscale(ImageTransform):
@@ -655,3 +689,308 @@ class ChannelTransformFactory:
             return creator.createTransform(image_size, output_channels, is_input)
         except (KeyError, ValueError):
             raise ValueError(f"channel_type must be one of {[c.value for c in ChannelType]}, got '{channel_type}'")
+
+
+def createSharedGeometricAugmentation(image_size: int,
+                                      flip_probability: float = 0.5,
+                                      crop_scale_min: float = 0.6,
+                                      crop_scale_max: float = 1.0) -> transforms.Compose:
+    """Build the train-time paired geometric augmentation.
+
+    The returned transform is applied once per image (on the PIL image) and shared by
+    the input and target transforms via PairedImageFolder(shared_augmentation=...), so
+    input and target stay pixel aligned. It replaces the deterministic square resize with
+    a random-resized crop plus horizontal flip; no rotation (border artifacts). ratio is
+    fixed to a mild band to limit aspect-ratio distortion.
+    """
+    return transforms.Compose([
+        transforms.RandomHorizontalFlip(p=flip_probability),
+        transforms.RandomResizedCrop(
+            image_size,
+            scale=(crop_scale_min, crop_scale_max),
+            ratio=(0.85, 1.18)
+        )
+    ])
+
+
+# Empirical mean_chroma band (p2..p98) of the dataset, measured in OpenCV LAB units by
+# analysis/phase0_budget.py over analysis_results/image_colors.csv (Phase 0.3). Used to
+# keep chroma scaling inside the colors the dataset actually contains.
+CHROMA_BAND_LOW: float = 9.30
+CHROMA_BAND_HIGH: float = 43.57
+
+
+class ChromaJitter(ImageTransform):
+    """BigColor-style chroma scaling of a target image, bounded to the dataset band.
+
+    Scales LAB chroma (ab <- s * ab, hue unchanged) by a per-call scalar s, applied with
+    probability `probability`. s is drawn from [chroma_min, chroma_max] but clamped per image
+    so the resulting mean chroma stays inside [chroma_band_low, chroma_band_high] (the p2..p98
+    band of mean_chroma; Phase 0.3), so an already-saturated image is never pushed past what
+    the dataset contains. Chroma is measured in OpenCV LAB units, matching
+    analysis/extract_colors.py. Target-side only, which keeps the luminance input pristine.
+    """
+
+    def __init__(self, probability: float = 0.5,
+                 chroma_min: float = 1.0, chroma_max: float = 1.5,
+                 chroma_band_low: float = CHROMA_BAND_LOW,
+                 chroma_band_high: float = CHROMA_BAND_HIGH,
+                 reference_max_side: int = 256) -> None:
+        self.probability: float = probability
+        self.chroma_min: float = chroma_min
+        self.chroma_max: float = chroma_max
+        self.chroma_band_low: float = chroma_band_low
+        self.chroma_band_high: float = chroma_band_high
+        # The band was measured at max_side 256 (extract_colors.py); measure chroma at the
+        # same reference resolution so the bound holds regardless of the input image size.
+        self.reference_max_side: int = reference_max_side
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if isinstance(img, Image.Image):
+            return self._handlePil(img)
+        raise TypeError(f"ChromaJitter expects a PIL image, got {type(img)}")
+
+    def _measureMeanChroma(self, rgb: np.ndarray) -> float:
+        """OpenCV-LAB mean chroma at the band's reference resolution."""
+        height, width = rgb.shape[:2]
+        longest_side: int = max(height, width)
+        if longest_side > self.reference_max_side:
+            scale: float = self.reference_max_side / longest_side
+            rgb = cv2.resize(rgb, (max(1, round(width * scale)), max(1, round(height * scale))),
+                             interpolation=cv2.INTER_AREA)
+        lab: np.ndarray = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        a: np.ndarray = lab[..., 1] - 128.0
+        b: np.ndarray = lab[..., 2] - 128.0
+        return float(np.sqrt(a * a + b * b).mean())
+
+    def _sampleScale(self, current_chroma: float) -> float:
+        """Scale factor honouring [chroma_min, chroma_max] and the empirical band."""
+        scale_low: float = max(self.chroma_min, self.chroma_band_low / current_chroma)
+        scale_high: float = min(self.chroma_max, self.chroma_band_high / current_chroma)
+        if scale_low <= scale_high:
+            return random.uniform(scale_low, scale_high)
+        if current_chroma < self.chroma_band_low:      # too desaturated: push up as far as allowed
+            return self.chroma_max
+        return 1.0                                     # already above band: leave unchanged
+
+    def _handlePil(self, img: Image.Image) -> Image.Image:
+        if random.random() >= self.probability:
+            return img
+        rgb: np.ndarray = np.asarray(img.convert("RGB"))
+        current_chroma: float = self._measureMeanChroma(rgb)
+        if current_chroma < 1e-6:                      # achromatic: nothing to scale
+            return img
+        scale: float = self._sampleScale(current_chroma)
+        lab: np.ndarray = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        lab[..., 1] = np.clip(128.0 + scale * (lab[..., 1] - 128.0), 0.0, 255.0)
+        lab[..., 2] = np.clip(128.0 + scale * (lab[..., 2] - 128.0), 0.0, 255.0)
+        scaled_rgb: np.ndarray = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+        return Image.fromarray(scaled_rgb, mode="RGB")
+
+
+def createChromaJitter(probability: float = 0.5,
+                       chroma_min: float = 1.0,
+                       chroma_max: float = 1.5) -> ChromaJitter:
+    """Build the target-side chroma-scaling augmentation (band bounds from Phase 0.3)."""
+    return ChromaJitter(probability=probability, chroma_min=chroma_min, chroma_max=chroma_max)
+
+
+# Color-classification bands, mirroring analysis/extract_colors.py (and
+# analysis_results/extract_colors_config.json) so the version remap operates on exactly the
+# same named colors the version labels were derived from. Hue is in degrees (0-360).
+REMAP_SATURATION_THRESHOLD: float = 0.20
+REMAP_BROWN_HUE: Tuple[float, float] = (15.0, 50.0)
+REMAP_BROWN_V: float = 0.55
+# Shadows are near-black regions that keep their colour under any real-world recolour (repaint a
+# green lawn brown and its shade stays near-black, it does not become brown). Pixels darker than
+# this are excluded from the remap, ramping in over REMAP_FEATHER_VALUE so there is no seam. The
+# floor is extract_colors.py's black threshold, so "protected shadow" means exactly "a pixel the
+# colour taxonomy calls black". Raising it further starts suppressing legitimate repaints of dark
+# OBJECTS (a dark red barn -> yellow), which leaves them two-tone; verified in
+# analysis/verify_shadow_protection.py.
+REMAP_SHADOW_VALUE: float = 0.20
+REMAP_FEATHER_VALUE: float = 0.10
+# Which hue band a pixel falls in is a NOISY per-pixel decision on a flat surface: measured on
+# real images, 62-82% of the in-band pixels of a speckling region sit within 10 deg of a band
+# edge, so a narrow feather makes neighbouring pixels of one surface land on opposite sides and
+# the remap comes out salt-and-pepper. Widen the edge feather and spatially smooth the blend
+# weight (median = drop isolated pixels, box = soften the rest); the hard protections (achromatic
+# threshold, shadow floor) are re-applied AFTER smoothing so they can never be blurred away.
+REMAP_FEATHER_DEG: float = 15.0
+REMAP_WEIGHT_SMOOTHING: int = 3
+REMAP_HUE_BINS: Tuple[Tuple[str, float, float], ...] = (
+    ("red", 345.0, 15.0), ("orange", 15.0, 45.0), ("yellow", 45.0, 70.0),
+    ("green", 70.0, 165.0), ("cyan", 165.0, 200.0), ("blue", 200.0, 255.0),
+    ("purple", 255.0, 290.0), ("magenta", 290.0, 320.0), ("pink", 320.0, 345.0),
+)
+ACHROMATIC_COLORS: frozenset = frozenset({"black", "gray", "white"})
+CHROMATIC_HUE_BAND: Dict[str, Tuple[float, float]] = (
+    {name: (start, end) for name, start, end in REMAP_HUE_BINS} | {"brown": REMAP_BROWN_HUE}
+)
+
+
+@dataclass
+class RemapTarget:
+    """Where a source color maps to, plus the target color's S/V statistics (as observed in
+    the cluster) used for S/V matching so e.g. gold->bronze darkens correctly."""
+    target_color: str
+    saturation_mean: float
+    saturation_std: float
+    value_mean: float
+    value_std: float
+
+
+class ClusterVersionRemap(ImageTransform):
+    """Cluster-conditioned color-version remap (Phase 1b L5b).
+
+    Remaps a whole color version to another version observed in the same cluster, one global
+    LUT per image: chromatic source colors are hue-mapped band->band (relative position within
+    the band preserved), chromatic->achromatic is a pure desaturation, and achromatic source
+    pixels (neutral backgrounds) are never touched. Dark pixels (value < shadow_value) are never
+    touched either: shadows stay near-black under a recolour instead of being tinted and lifted
+    toward the target's mean value. Mapped pixels' saturation/value are matched to the target
+    color's S/V statistics. Band edges, the achromatic saturation threshold and the shadow floor
+    are feathered to avoid seams and chroma-noise flicker. Colors are classified with the exact
+    bands from analysis/extract_colors.py. Target-side only.
+
+    correspondence maps each source color name to a RemapTarget; entries whose target equals the
+    source, and any achromatic source, are treated as identity.
+    """
+
+    def __init__(self, correspondence: Dict[str, RemapTarget], probability: float = 0.5,
+                 saturation_threshold: float = REMAP_SATURATION_THRESHOLD,
+                 feather_deg: float = REMAP_FEATHER_DEG, feather_saturation: float = 0.05,
+                 shadow_value: float = REMAP_SHADOW_VALUE,
+                 feather_value: float = REMAP_FEATHER_VALUE,
+                 weight_smoothing: int = REMAP_WEIGHT_SMOOTHING,
+                 sv_ratio_bounds: Tuple[float, float] = (0.5, 1.5)) -> None:
+        if weight_smoothing not in (0, 3, 5):
+            raise ValueError("weight_smoothing must be 0 (off), 3 or 5 "
+                             f"(cv2.medianBlur float32 limit), got {weight_smoothing}")
+        self.correspondence: Dict[str, RemapTarget] = correspondence
+        self.probability: float = probability
+        self.saturation_threshold: float = saturation_threshold
+        self.feather_deg: float = feather_deg
+        self.feather_saturation: float = feather_saturation
+        self.shadow_value: float = shadow_value
+        self.feather_value: float = feather_value
+        self.weight_smoothing: int = weight_smoothing
+        # Bounds on the S/V std-matching ratio. Unbounded ratios blow up when a source region
+        # is nearly uniform (tiny sample std), turning matching into salt-and-pepper noise.
+        self.sv_ratio_bounds: Tuple[float, float] = sv_ratio_bounds
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if isinstance(img, Image.Image):
+            return self._handlePil(img)
+        raise TypeError(f"ClusterVersionRemap expects a PIL image, got {type(img)}")
+
+    @staticmethod
+    def _inBand(hue: np.ndarray, start: float, end: float) -> np.ndarray:
+        if start < end:
+            return (hue >= start) & (hue < end)
+        return (hue >= start) | (hue < end)      # red wraps through 360
+
+    def _sourceMask(self, color: str, hue: np.ndarray, achromatic: np.ndarray,
+                    brown_mask: np.ndarray) -> np.ndarray:
+        if color == "brown":
+            return brown_mask
+        start, end = CHROMATIC_HUE_BAND[color]
+        return (~achromatic) & self._inBand(hue, start, end) & (~brown_mask)
+
+    def _protectionGate(self, saturation: np.ndarray, value: np.ndarray) -> np.ndarray:
+        """Hard per-pixel protections as a soft gate in [0,1]: neutral pixels (below the
+        achromatic threshold) and shadows (below the value floor) are never remapped. Applied
+        AFTER any spatial smoothing so smoothing cannot leak weight into a protected pixel."""
+        weight_saturation: np.ndarray = np.clip(
+            (saturation - self.saturation_threshold) / max(self.feather_saturation, 1e-6), 0.0, 1.0)
+        weight_value: np.ndarray = np.clip(
+            (value - self.shadow_value) / max(self.feather_value, 1e-6), 0.0, 1.0)
+        return weight_saturation * weight_value
+
+    def _bandWeight(self, color: str, hue: np.ndarray) -> np.ndarray:
+        """Soft membership of the source hue band, fading towards the band edges so a surface
+        whose hue jitters across an edge is not split pixel-by-pixel."""
+        start, end = CHROMATIC_HUE_BAND[color]
+        distance_to_edge: np.ndarray = np.minimum((hue - start) % 360.0, (end - hue) % 360.0)
+        return np.clip(distance_to_edge / max(self.feather_deg, 1e-6), 0.0, 1.0)
+
+    def _smoothWeight(self, weight: np.ndarray) -> np.ndarray:
+        """Spatially de-speckle the blend weight: band membership is a noisy per-pixel decision,
+        but a real recolour applies to whole surfaces. Median drops isolated pixels, the box blur
+        softens what remains."""
+        if self.weight_smoothing < 3:
+            return weight
+        smoothed: np.ndarray = cv2.medianBlur(weight.astype(np.float32), self.weight_smoothing)
+        return cv2.blur(smoothed, (self.weight_smoothing, self.weight_smoothing)).astype(np.float64)
+
+    @staticmethod
+    def _remapHue(hue: np.ndarray, source_band: Tuple[float, float],
+                  target_band: Tuple[float, float]) -> np.ndarray:
+        source_width: float = (source_band[1] - source_band[0]) % 360.0 or 360.0
+        target_width: float = (target_band[1] - target_band[0]) % 360.0 or 360.0
+        position: np.ndarray = ((hue - source_band[0]) % 360.0) / source_width
+        return (target_band[0] + position * target_width) % 360.0
+
+    def _matchMoments(self, values: np.ndarray, sample: np.ndarray,
+                      target_mean: float, target_std: float) -> np.ndarray:
+        sample_mean: float = float(sample.mean())
+        sample_std: float = float(sample.std())
+        if sample_std < 1e-4:
+            return values - sample_mean + target_mean          # uniform source: shift mean only
+        low, high = self.sv_ratio_bounds
+        ratio: float = min(max(target_std / sample_std, low), high)
+        return (values - sample_mean) * ratio + target_mean
+
+    @staticmethod
+    def _blendHue(base: np.ndarray, target: np.ndarray, weight: np.ndarray) -> np.ndarray:
+        delta: np.ndarray = ((target - base + 180.0) % 360.0) - 180.0   # shortest circular step
+        return (base + weight * delta) % 360.0
+
+    def _handlePil(self, img: Image.Image) -> Image.Image:
+        if random.random() >= self.probability:
+            return img
+        rgb: np.ndarray = np.asarray(img.convert("RGB"))
+        hsv: np.ndarray = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(np.float64)
+        hue: np.ndarray = hsv[..., 0] * 2.0
+        saturation: np.ndarray = hsv[..., 1] / 255.0
+        value: np.ndarray = hsv[..., 2] / 255.0
+
+        achromatic: np.ndarray = saturation < self.saturation_threshold
+        brown_mask: np.ndarray = (~achromatic) & self._inBand(hue, *REMAP_BROWN_HUE) \
+            & (value < REMAP_BROWN_V)
+        # Shadows are excluded from the mask, not just from the blend weight, so the S/V
+        # moment-matching statistics are taken from the lit part of the region only.
+        lit: np.ndarray = value >= self.shadow_value
+        gate: np.ndarray = self._protectionGate(saturation, value)
+
+        out_hue: np.ndarray = hue.copy()
+        out_saturation: np.ndarray = saturation.copy()
+        out_value: np.ndarray = value.copy()
+        for source_color, target in self.correspondence.items():
+            if source_color in ACHROMATIC_COLORS or target.target_color == source_color:
+                continue
+            mask: np.ndarray = self._sourceMask(source_color, hue, achromatic, brown_mask) & lit
+            if not mask.any():
+                continue
+            band: np.ndarray = np.where(mask, self._bandWeight(source_color, hue), 0.0)
+            weight: np.ndarray = self._smoothWeight(band) * gate
+
+            matched_saturation: np.ndarray = np.clip(self._matchMoments(
+                saturation, saturation[mask], target.saturation_mean, target.saturation_std), 0.0, 1.0)
+            matched_value: np.ndarray = np.clip(self._matchMoments(
+                value, value[mask], target.value_mean, target.value_std), 0.0, 1.0)
+
+            inverse_weight: np.ndarray = 1.0 - weight
+            out_saturation = out_saturation * inverse_weight + matched_saturation * weight
+            out_value = out_value * inverse_weight + matched_value * weight
+            if target.target_color not in ACHROMATIC_COLORS:       # achromatic target: keep hue, desaturate
+                remapped_hue: np.ndarray = self._remapHue(
+                    hue, CHROMATIC_HUE_BAND[source_color], CHROMATIC_HUE_BAND[target.target_color])
+                hue_delta: np.ndarray = ((remapped_hue - out_hue + 180.0) % 360.0) - 180.0
+                out_hue = (out_hue + weight * hue_delta) % 360.0
+
+        hsv_out: np.ndarray = np.stack(
+            [(out_hue / 2.0) % 180.0, out_saturation * 255.0, out_value * 255.0], axis=-1)
+        rgb_out: np.ndarray = cv2.cvtColor(np.clip(hsv_out, 0.0, 255.0).astype(np.uint8),
+                                           cv2.COLOR_HSV2RGB)
+        return Image.fromarray(rgb_out, mode="RGB")

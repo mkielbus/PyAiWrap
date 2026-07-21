@@ -5,11 +5,13 @@ from torchvision import transforms
 from PIL import Image
 import torch
 import random
-from typing import List, Tuple, Optional
+from typing import Callable, Dict, List, Tuple, Optional
 import pandas as pd
 import numpy as np
 import pickle
 from scipy.ndimage import zoom
+
+from pyaiwrap.transforms import PathAwareImageTransform
 
 
 class EdgesDataset(Dataset):
@@ -33,41 +35,59 @@ class EdgesDataset(Dataset):
 
 
 class PairedImageFolder(Dataset):
-    def __init__(self, images_folder_path, input_transform, target_transform,
-                 segmentation_pairing: Optional[str] = None):
+    def __init__(self, images_folder_path: str,
+                 input_transform: Callable,
+                 target_transform: Callable,
+                 segmentation_pairing: Optional[str] = None,
+                 shared_augmentation: Optional[Callable] = None,
+                 target_augmentation: Optional[Callable] = None) -> None:
         """
         images_folder_path: path to folder with images
-        modification_transform: transform applied to modified images
-        resize_transform: transform applied to real images
-        segmentation_pairing: optional path to a csv with header image_filepath,edges_filepath pairing
-            each image with its edges image; when given, edges are stacked onto the input image channels
+        input_transform: transform producing the model input from a PIL image
+        target_transform: transform producing the target from the same PIL image
+        segmentation_pairing: optional path to a csv with header image_filepath,edges_filepath
+            pairing each image with its edges image; when given, edges are stacked onto the
+            input image channels
+        shared_augmentation: optional callable applied once to each PIL image before the
+            input/target transforms, so both branches receive the identical geometric view
+            (train-time flip/crop). Sampled once per __getitem__. Because the edges path is
+            not co-augmented, it cannot be combined with segmentation_pairing (raises ValueError).
+        target_augmentation: optional callable applied to the target branch only, after the
+            shared geometric augmentation (train-time photometric augmentation, e.g. chroma
+            jitter). Keeps the input pristine, so recomputed luminance is unaffected.
+
+        The image is decoded once (single ImageFolder with transform=None), which removes the
+        previous double-decode and makes the input/target pairing correct by construction.
         """
 
-        self._input_dataset = ImageFolder(images_folder_path, transform=input_transform)
-        self._target_dataset = ImageFolder(images_folder_path, transform=target_transform)
+        if segmentation_pairing is not None and shared_augmentation is not None:
+            raise ValueError(
+                "shared_augmentation cannot be combined with segmentation_pairing: edge maps "
+                "are not co-augmented and would misalign with the augmented image."
+            )
 
-        assert len(self._input_dataset) == len(self._target_dataset), \
-            f"Dataset length mismatch: {len(self._input_dataset)} vs {len(self._target_dataset)}"
+        self._dataset: ImageFolder = ImageFolder(images_folder_path, transform=None)
+        self._input_transform: Callable = input_transform
+        self._target_transform: Callable = target_transform
+        self._shared_augmentation: Optional[Callable] = shared_augmentation
+        self._target_augmentation: Optional[Callable] = target_augmentation
 
-        # Verify that pairs correspond
-        self._verify_pairs()
-
-        self._edges_dataset = None
+        self._edges_dataset: Optional[EdgesDataset] = None
         if segmentation_pairing is not None:
             self._edges_dataset = self._buildEdgesDataset(segmentation_pairing, input_transform)
 
-    def _buildEdgesDataset(self, segmentation_pairing: str, input_transform) -> EdgesDataset:
-        """Build an edges dataset ordered like _input_dataset from the pairing csv"""
+    def _buildEdgesDataset(self, segmentation_pairing: str, input_transform: Callable) -> EdgesDataset:
+        """Build an edges dataset ordered like the base dataset from the pairing csv"""
 
-        pairing = pd.read_csv(segmentation_pairing)
-        edges_by_filename = {
+        pairing: pd.DataFrame = pd.read_csv(segmentation_pairing)
+        edges_by_filename: Dict[str, str] = {
             os.path.basename(image_path): edges_path
             for image_path, edges_path in zip(pairing['image_filepath'], pairing['edges_filepath'])
         }
 
-        edges_filepaths = []
-        for image_path, _ in self._input_dataset.samples:
-            filename = os.path.basename(image_path)
+        edges_filepaths: List[str] = []
+        for image_path, _ in self._dataset.samples:
+            filename: str = os.path.basename(image_path)
             if filename not in edges_by_filename:
                 raise ValueError(
                     f"No edges entry in {segmentation_pairing} for image {image_path}"
@@ -77,7 +97,7 @@ class PairedImageFolder(Dataset):
         return EdgesDataset(edges_filepaths, self._findResizeTransform(input_transform))
 
     @staticmethod
-    def _findResizeTransform(input_transform) -> Optional[transforms.Resize]:
+    def _findResizeTransform(input_transform: Callable) -> Optional[transforms.Resize]:
         """Extract the resize step from the input transform so edges are resized the same way"""
 
         if isinstance(input_transform, transforms.Resize):
@@ -88,35 +108,34 @@ class PairedImageFolder(Dataset):
                     return transform
         return None
 
-    def _verify_pairs(self):
-        """Verify that modified_dataset[i] and real_dataset[i] are the same image"""
+    def __len__(self) -> int:
+        return len(self._dataset)
 
-        for iterator in range(len(self._input_dataset)):
-            mod_path, _ = self._input_dataset.samples[iterator]
-            real_path, _ = self._target_dataset.samples[iterator]
+    def _applyTargetAugmentation(self, image: Image.Image, idx: int) -> Image.Image:
+        """Path-aware augmentations (e.g. the cluster-version remap, whose correspondence depends
+        on the source image's cluster) are told which file the image came from; plain photometric
+        augmentations are called with the image alone."""
+        if isinstance(self._target_augmentation, PathAwareImageTransform):
+            return self._target_augmentation(image, self._dataset.samples[idx][0])
+        return self._target_augmentation(image)
 
-            mod_filename = os.path.basename(mod_path)
-            real_filename = os.path.basename(real_path)
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+        image, label = self._dataset[idx]           # PIL RGB image, decoded once
+        if self._shared_augmentation is not None:
+            image = self._shared_augmentation(image)  # single geometric op shared by both branches
 
-            if not mod_filename == real_filename:
-                raise ValueError(
-                    f"Pair mismatch at index {iterator}:\n"
-                    f"  Modified: {mod_path}\n"
-                    f"  Real:     {real_path}"
-                )
+        target_image = image
+        if self._target_augmentation is not None:
+            target_image = self._applyTargetAugmentation(image, idx)  # target-side aug only
 
-    def __len__(self):
-        return len(self._input_dataset)
-
-    def __getitem__(self, idx):
-        modified_img, modified_label = self._input_dataset[idx]
-        real_img, real_label = self._target_dataset[idx]
+        model_input: torch.Tensor = self._input_transform(image)
+        target: torch.Tensor = self._target_transform(target_image)
 
         if self._edges_dataset is not None:
-            edges_img = self._edges_dataset[idx]
-            modified_img = torch.cat([modified_img, edges_img], dim=0)
+            edges_img: torch.Tensor = self._edges_dataset[idx]
+            model_input = torch.cat([model_input, edges_img], dim=0)
 
-        return modified_img, real_img, modified_label, real_label
+        return model_input, target, label, label
 
 
 class RandomInpaintingMask:
