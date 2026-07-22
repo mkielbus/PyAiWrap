@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,6 +8,13 @@ from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
 from .transforms import labToRgb, labToRgbForVisualization
 from monai.losses import DiceCELoss
+
+# Autocast dtypes selectable from a config. bfloat16 keeps fp32's exponent range, so unlike
+# float16 it needs no GradScaler.
+_AUTOCAST_DTYPES: Dict[str, torch.dtype] = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
 
 
 class LPIPSLoss(nn.Module):
@@ -437,7 +446,9 @@ class GeneratorColorizationLoss:
         lpips_net: str = 'alex',
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         input_channel: str = "RGB",
-        target_channel: str = "RGB"
+        target_channel: str = "RGB",
+        mixed_precision: bool = False,
+        mixed_precision_dtype: str = "bfloat16"
     ):
         """
         Initialize generator loss function.
@@ -454,6 +465,14 @@ class GeneratorColorizationLoss:
             input_channel: Type of input channel ("RGB", "R", "G", "B", "LAB", "AB", "luminance")
             target_channel: Type of target channel ("RGB", "R", "G", "B", "LAB", "AB",
                             "LAB_A", "LAB_B", "luminance")
+            mixed_precision: Run the GENERATOR FORWARD under torch.autocast (default False =
+                             unchanged fp32 behaviour). Every loss term stays in fp32: the
+                             generator output is cast back before reconstruction/LPIPS/LAB
+                             conversion/colourfulness, because labToRgb and the colourfulness
+                             statistic are precision-sensitive and LPIPS is a frozen fp32 net.
+                             Backward runs outside the autocast context but inherits the bf16
+                             ops recorded in the forward, so the speed/memory win is kept.
+            mixed_precision_dtype: "bfloat16" (default, no GradScaler needed) or "float16".
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.recon_weight = recon_weight
@@ -464,6 +483,11 @@ class GeneratorColorizationLoss:
         self.device = device
         self.input_channel = input_channel
         self.target_channel = target_channel
+        self.mixed_precision = mixed_precision
+        if mixed_precision_dtype not in _AUTOCAST_DTYPES:
+            raise ValueError(f"mixed_precision_dtype must be one of {sorted(_AUTOCAST_DTYPES)}, "
+                             f"got {mixed_precision_dtype!r}")
+        self.mixed_precision_dtype = _AUTOCAST_DTYPES[mixed_precision_dtype]
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
@@ -496,7 +520,16 @@ class GeneratorColorizationLoss:
         generator = models['generator']
 
         modifiedImages, originalImages = batch[0], batch[1]
-        reconstructedImages = generator(modifiedImages)
+        # nullcontext (not autocast(enabled=False)) so the fp32 path is untouched: merely entering
+        # a disabled autocast region perturbs kernel selection by ~1 ULP.
+        forwardContext = (torch.autocast(device_type=self.device.type,
+                                         dtype=self.mixed_precision_dtype)
+                          if self.mixed_precision else contextlib.nullcontext())
+        with forwardContext:
+            reconstructedImages = generator(modifiedImages)
+        # Every loss term below runs in fp32 on purpose -- see mixed_precision in __init__.
+        if reconstructedImages.dtype != torch.float32:
+            reconstructedImages = reconstructedImages.float()
 
         reconstructionLoss = self.calculateReconstructionLoss(
             reconstructedImages, originalImages

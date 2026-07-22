@@ -372,7 +372,11 @@ class StandardTrainingConfigBuilder(ConfigBuilder):
             "TRAINING_TYPE": "standard",
             "EPOCHS": 300,
             "PATIENCE": 30,
-            "GRADIENT_CLIP": 1.0
+            "GRADIENT_CLIP": 1.0,
+            # Autocast the generator forward. False = unchanged fp32 behaviour; the loss terms
+            # stay fp32 either way (see GeneratorColorizationLoss.mixed_precision).
+            "MIXED_PRECISION": False,
+            "MIXED_PRECISION_DTYPE": "bfloat16"
         }
 
     def getCategory(self) -> ConfigCategory:

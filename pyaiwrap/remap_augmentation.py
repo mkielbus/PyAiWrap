@@ -30,16 +30,27 @@ def _splitColorSet(pipe_joined: str) -> FrozenSet[str]:
     return frozenset(part for part in pipe_joined.split("|") if part)
 
 
+def _splitColumn(fieldnames: Tuple[str, ...]) -> str:
+    """The sidecar's split column is named after the dataset version that produced it."""
+    for candidate in ("split_v3", "split_v2", "split"):
+        if candidate in fieldnames:
+            return candidate
+    raise ValueError(f"no split column in image_versions.csv, got {list(fieldnames)}")
+
+
 def loadImageMetadata(image_versions_path: str, split: Optional[str] = None) -> ImageMetadata:
     """Read the Phase 0.4 per-image sidecar (image_versions.csv) into a filename lookup.
 
-    `split` filters on the split_v2 column (pass "train" to keep only training images, so a
+    `split` filters on the sidecar's split column -- `split_v3` for the v3 dataset, `split_v2`
+    for the v2 one, detected from the header (pass "train" to keep only training images, so a
     stray val/test file can never be augmented); None keeps every row.
     """
     metadata: ImageMetadata = {}
     with open(image_versions_path, newline="") as handle:
-        for row in csv.DictReader(handle):
-            if split is not None and row["split_v2"] != split:
+        reader = csv.DictReader(handle)
+        column: str = _splitColumn(tuple(reader.fieldnames or ()))
+        for row in reader:
+            if split is not None and row[column] != split:
                 continue
             achromatic: FrozenSet[str] = _splitColorSet(row["achromatic_set"])
             chromatic: FrozenSet[str] = _splitColorSet(row["version"]) - achromatic
