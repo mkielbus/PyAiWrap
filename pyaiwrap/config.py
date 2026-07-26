@@ -157,6 +157,7 @@ class SchedulerType(Enum):
     COSINE_WARM_RESTARTS = "cosine_warm_restarts"
     ONECYCLE = "onecycle"
     COSINE = "cosine"
+    COSINE_WARMUP = "cosine_warmup"
     STEP = "step"
     POLYWARMUP = "polywarmup"
     MULTI_STEP = "multi_step"
@@ -376,7 +377,14 @@ class StandardTrainingConfigBuilder(ConfigBuilder):
             # Autocast the generator forward. False = unchanged fp32 behaviour; the loss terms
             # stay fp32 either way (see GeneratorColorizationLoss.mixed_precision).
             "MIXED_PRECISION": False,
-            "MIXED_PRECISION_DTYPE": "bfloat16"
+            "MIXED_PRECISION_DTYPE": "bfloat16",
+            # Exponential moving average of the model weights. USE_EMA off keeps the raw-weight
+            # behaviour unchanged. When on, validation/checkpoints use the averaged weights;
+            # EMA_DECAY is per optimisation step, EMA_WARMUP_UPDATES ramps the decay from 0 so
+            # the random initialisation is forgotten quickly (0 disables the ramp).
+            "USE_EMA": False,
+            "EMA_DECAY": 0.9999,
+            "EMA_WARMUP_UPDATES": 0
         }
 
     def getCategory(self) -> ConfigCategory:
@@ -447,6 +455,7 @@ class SchedulerConfigBuilderFactory:
             SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsConfigBuilder(),
             SchedulerType.ONECYCLE: OneCycleSchedulerConfigBuilder(),
             SchedulerType.COSINE: CosineSchedulerConfigBuilder(),
+            SchedulerType.COSINE_WARMUP: CosineWarmupSchedulerConfigBuilder(),
             SchedulerType.STEP: StepSchedulerConfigBuilder(),
             SchedulerType.POLYWARMUP: PolyWarmupSchedulerConfigBuilder(),
             SchedulerType.MULTI_STEP: MultiStepSchedulerrConfigBuilder()
@@ -498,6 +507,21 @@ class CosineSchedulerConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "SCHEDULER_TYPE": "cosine",
+            "MIN_LR": 1e-6
+        }
+
+    def getCategory(self) -> ConfigCategory:
+        return ConfigCategory.SCHEDULER
+
+
+class CosineWarmupSchedulerConfigBuilder(ConfigBuilder):
+    def getDefaults(self) -> Dict[str, Any]:
+        return {
+            "SCHEDULER_TYPE": "cosine_warmup",
+            # Epochs of linear warmup from BASE_LR to PEAK_LR before the cosine decay.
+            "COSINE_WARMUP_EPOCHS": 10,
+            "BASE_LR": 2e-5,
+            "PEAK_LR": 2e-4,
             "MIN_LR": 1e-6
         }
 

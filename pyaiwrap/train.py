@@ -6,6 +6,7 @@ import os
 from itertools import islice
 from typing import Any, Dict, Callable, Optional, Tuple
 from .metrics import Metrics
+from .ema import WeightEma
 
 
 def train(
@@ -30,7 +31,8 @@ def train(
     control_fn: Optional[Callable] = None,
     early_stopping_metric: str = "loss",
     control_train_batch_number: int = 0,
-    control_val_batch_number: int = 0
+    control_val_batch_number: int = 0,
+    ema: Optional[Dict[str, WeightEma]] = None
 ) -> Dict[str, Any]:
     """
     Generic training function for generator models with support for multiple models.
@@ -76,6 +78,11 @@ def train(
         early_stopping_metric (str): Name of metric to use for early stopping (default: "loss").
         control_train_batch_number (int): Index of the train batch passed to control_fn (default: 0).
         control_val_batch_number (int): Index of the validation batch passed to control_fn (default: 0).
+        ema (Optional[Dict[str, WeightEma]]): Per-model exponential moving averages, keyed like
+                                        `models`. When given, the averaged weights are updated
+                                        after every optimiser step and swapped in for validation,
+                                        visualisation and the saved/best checkpoints; training
+                                        itself continues on the raw weights. None disables EMA.
 
     Returns:
         Dict[str, Any]: Dictionary containing metrics object and training information.
@@ -101,6 +108,13 @@ def train(
 
         model.to(device)
 
+    # Seed each EMA shadow from the weights the model actually starts from (fresh init or
+    # loaded checkpoint), so a warm start does not average in a stale random init. A resumable
+    # checkpoint below overwrites this with the exact saved shadow when present.
+    if ema is not None:
+        for model_name, model_ema in ema.items():
+            model_ema.reset(models[model_name])
+
     if os.path.exists(checkpoint_path):
         print(f"Loading training state from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -123,6 +137,15 @@ def train(
         if 'metrics_state' in checkpoint and hasattr(metrics, 'setState'):
             metrics.setState(checkpoint['metrics_state'])
             print("Loaded metrics history")
+
+        if ema is not None:
+            ema_states = checkpoint.get('ema', {})
+            for model_name, model_ema in ema.items():
+                if model_name in ema_states:
+                    model_ema.loadStateDict(ema_states[model_name])
+                    print(f"Loaded EMA state for {model_name}")
+                # Otherwise keep the shadow seeded from the loaded weights above (checkpoint
+                # predates EMA).
 
         print(f"Resuming training from epoch {start_epoch}")
 
@@ -187,12 +210,25 @@ def train(
             for optimizer in optimizers.values():
                 optimizer.step()
 
+            if ema is not None:
+                for model_name, model in models.items():
+                    if model_name in ema:
+                        ema[model_name].update(model)
+
             loss_value = loss_tensor.item()
             train_iterator.set_postfix(loss=f"{loss_value:.6f}")
 
         if schedulers is not None:
             for scheduler in schedulers.values():
                 scheduler.step()
+
+        # Swap the averaged weights in for validation, visualisation and checkpointing; the raw
+        # training weights are restored below before the next epoch and before they are saved
+        # for resuming, so optimisation always continues from the un-averaged weights.
+        if ema is not None:
+            for model_name, model in models.items():
+                if model_name in ema:
+                    ema[model_name].applyTo(model)
 
         metrics.setPhase('val')
 
@@ -238,6 +274,12 @@ def train(
                     launch_number=launch_number
                 )
 
+        # Put the raw training weights back before anything is persisted for resuming.
+        if ema is not None:
+            for model_name, model in models.items():
+                if model_name in ema:
+                    ema[model_name].restore(model)
+
         metrics.save(diagrams_data_path, config_id, model_type, launch_number)
 
         for model_name, model in models.items():
@@ -257,6 +299,9 @@ def train(
         if hasattr(metrics, 'getState'):
             checkpoint['metrics_state'] = metrics.getState()
 
+        if ema is not None:
+            checkpoint['ema'] = {name: model_ema.stateDict() for name, model_ema in ema.items()}
+
         torch.save(checkpoint, checkpoint_path)
 
         val_metric = metrics.getMetric(epoch + 1, 'val', early_stopping_metric)
@@ -266,7 +311,12 @@ def train(
             current_patience = 0
             for model_name, model in models.items():
                 best_model_path = os.path.join(weights_path, f"best_performance_{model_type}_{model_name}_hyperparams_{config_id}.pth")
-                torch.save(model.state_dict(), best_model_path)
+                # The validation metric above was measured on the EMA weights, so the best
+                # checkpoint stores those averaged weights (not the raw ones now in the model).
+                if ema is not None and model_name in ema:
+                    torch.save(ema[model_name].emaStateDict(), best_model_path)
+                else:
+                    torch.save(model.state_dict(), best_model_path)
 
             best_checkpoint = {
                 'epoch': epoch + 1,
@@ -280,6 +330,9 @@ def train(
 
             if hasattr(metrics, 'getState'):
                 best_checkpoint['metrics_state'] = metrics.getState()
+
+            if ema is not None:
+                best_checkpoint['ema'] = {name: model_ema.stateDict() for name, model_ema in ema.items()}
 
             best_checkpoint_path = os.path.join(weights_path, f"best_performance_{model_type}_training_state_hyperparams_{config_id}.pth")
             torch.save(best_checkpoint, best_checkpoint_path)

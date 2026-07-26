@@ -1,3 +1,4 @@
+import math
 import torch
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -12,6 +13,7 @@ class SchedulerType(Enum):
     COSINE_WARM_RESTARTS = "cosine_warm_restarts"
     ONECYCLE = "onecycle"
     COSINE = "cosine"
+    COSINE_WARMUP = "cosine_warmup"
     STEP = "step"
     EXPONENTIAL = "exponential"
     POLYWARMUP = "polywarmup"
@@ -143,6 +145,66 @@ class PolyWarmupScheduler(_LRScheduler):
         return [lr for _ in self.optimizer.param_groups]
 
 
+class CosineWarmupScheduler(_LRScheduler):
+    """Linear warmup to a peak learning rate, then cosine decay to a floor.
+
+    The epoch-based counterpart of PolyWarmupScheduler: train() steps schedulers once per
+    epoch, so ``last_epoch`` is an epoch index. For the first ``warmup_epochs`` epochs the
+    rate rises linearly from ``base_lr`` to ``peak_lr``; the remaining epochs anneal it from
+    ``peak_lr`` down to ``min_lr`` following a half-cosine. Both segments meet continuously
+    at ``peak_lr``.
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_epochs: int = 10,
+        total_epochs: int = 200,
+        base_lr: float = 2e-5,
+        peak_lr: float = 2e-4,
+        min_lr: float = 1e-6,
+        last_epoch: int = -1
+    ):
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.peak_lr = peak_lr
+        self.min_lr = min_lr
+
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        """Calculate learning rate for the current epoch."""
+        if not self._get_lr_called_within_step:
+            warnings.warn("To get the last learning rate computed by the scheduler, "
+                          "please use `get_last_lr()`.", UserWarning)
+
+        if self.last_epoch < self.warmup_epochs:
+            # Linear warmup: from base_lr to peak_lr.
+            progress = self.last_epoch / self.warmup_epochs
+            lr = self.base_lr + (self.peak_lr - self.base_lr) * progress
+        else:
+            # Cosine decay after warmup: from peak_lr to min_lr.
+            decay_epochs = max(1, self.total_epochs - self.warmup_epochs)
+            progress = min(1.0, (self.last_epoch - self.warmup_epochs) / decay_epochs)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            lr = self.min_lr + (self.peak_lr - self.min_lr) * cosine
+
+        return [lr for _ in self.optimizer.param_groups]
+
+
+class CosineWarmupCreator(SchedulerCreator):
+    def createScheduler(self, optimizer, config: Config):
+        return CosineWarmupScheduler(
+            optimizer,
+            warmup_epochs=config["COSINE_WARMUP_EPOCHS"],
+            total_epochs=config["EPOCHS"],
+            base_lr=config["BASE_LR"],
+            peak_lr=config["PEAK_LR"],
+            min_lr=config["MIN_LR"]
+        )
+
+
 class PolyWarmupCreator(SchedulerCreator):
     def createScheduler(self, optimizer, config: Config):
         return PolyWarmupScheduler(
@@ -162,6 +224,7 @@ class SchedulerFactory:
         SchedulerType.COSINE_WARM_RESTARTS: CosineWarmRestartsCreator(),
         SchedulerType.ONECYCLE: OneCycleCreator(),
         SchedulerType.COSINE: CosineCreator(),
+        SchedulerType.COSINE_WARMUP: CosineWarmupCreator(),
         SchedulerType.STEP: StepCreator(),
         SchedulerType.EXPONENTIAL: ExponentialCreator(),
         SchedulerType.POLYWARMUP: PolyWarmupCreator(),
