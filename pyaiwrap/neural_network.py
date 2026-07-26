@@ -1068,6 +1068,23 @@ class MultiScaleColorDecoder(nn.Module):
         return self._final_projection(color_decoder_output)  # [batch_size, memory_size, color_dim] -> [batch_size, memory_size, output_dim]
 
 
+class ScaledTanh(nn.Module):
+    """Bounded output activation computing ``scale * tanh(x)``.
+
+    Intended as the final colorisation layer: it keeps the regressed AB channels inside
+    Kornia's native Lab gamut (roughly [-scale, scale]) instead of letting them drift to
+    extreme values, while staying smooth and differentiable. The default scale matches the
+    AB range documented by the ExtractABChannels transform.
+    """
+
+    def __init__(self, scale: float = 127.0) -> None:
+        super().__init__()
+        self.scale: float = scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.scale * torch.tanh(x)
+
+
 class ColorMemoryTransformer(nn.Module):
     def __init__(self,
                  color_dim: int = 256,
