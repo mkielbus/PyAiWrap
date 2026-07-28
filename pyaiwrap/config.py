@@ -675,7 +675,10 @@ class SubmodularModelConfigBuilder(StandardModelConfigBuilder):
         parent_defaults = super().getDefaults()
         parent_defaults.update({
             "MODEL_TYPE": "submodular",
-            "MODULAR_CLASS": "ConvAttenColorizationNetwork"
+            "MODULAR_CLASS": "ConvAttenColorizationNetwork",
+            # None = keep the modular class's per-layout default (see
+            # ConvAttenColorizationNetwork._resolveConcatenateInput); True/False overrides it.
+            "CONCATENATE_INPUT": None
         })
         return parent_defaults
 

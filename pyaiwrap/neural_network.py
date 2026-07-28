@@ -1249,6 +1249,7 @@ class ConvAttenColorizationNetwork(nn.Module):
         pretrained_models_config: Dict[str, Dict[str, str]],
         trainable_network: nn.Module,  # Generic trainable network
         pretrained_input_channels: int = 1,
+        concatenate_input: Optional[bool] = None,
     ):
         super().__init__()
 
@@ -1256,6 +1257,7 @@ class ConvAttenColorizationNetwork(nn.Module):
 
         self._pretrained_models_config = pretrained_models_config
         self._pretrained_input_channels = pretrained_input_channels
+        self._concatenate_input: bool = self._resolveConcatenateInput(concatenate_input)
 
         self._pretrained_models = nn.ModuleDict()
         self._load_pretrained_models()
@@ -1268,6 +1270,20 @@ class ConvAttenColorizationNetwork(nn.Module):
         super().train(mode)
         self._pretrained_models.eval()
         return self
+
+    def _resolveConcatenateInput(self, concatenate_input: Optional[bool]) -> bool:
+        """Decide whether the model input is stacked in front of the submodules' predictions.
+
+        The chroma-only (a, b) layout has always needed it: without luminance the trainable
+        network would see two channels that do not form an image. The RGB layout does not
+        *need* it, but the trainable network is strictly better off with it -- the frozen
+        extractors are the only source of structure otherwise, so any detail they dropped is
+        unrecoverable. `None` keeps the historical per-layout behaviour so existing
+        checkpoints load; pass an explicit bool to opt in or out.
+        """
+        if concatenate_input is not None:
+            return concatenate_input
+        return "a_model" in self._color_model_names
 
     def _resolve_model_names(self, configured_models) -> List[str]:
         for model_set in self._SUPPORTED_MODEL_SETS:
@@ -1317,9 +1333,10 @@ class ConvAttenColorizationNetwork(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         model_input, edges = self._separate_edges(x)
         initial_colors = self._generate_color_channels(model_input)
-        if "a_model" in self._color_model_names:
-            # Chroma-only (a, b) predictions need luminance stacked back on top so the
-            # trainable network sees full LAB, not just chroma
+        if self._concatenate_input:
+            # Stack the pristine input (luminance) in front of the predictions, so the
+            # trainable network sees full LAB / luminance+RGB rather than the frozen
+            # extractors' output alone
             initial_colors = torch.cat([model_input, initial_colors], dim=1)
         if edges is not None:
             initial_colors = torch.cat([initial_colors, edges], dim=1)
@@ -1327,14 +1344,48 @@ class ConvAttenColorizationNetwork(nn.Module):
         return final_output
 
 
+def createGroupNorm(norm_groups: Optional[int], channels: int) -> nn.Module:
+    """Group normalisation for a UNet block, or a no-op when normalisation is disabled.
+
+    `None` (the default everywhere) yields `nn.Identity`, so a block built without the
+    parameter is numerically identical to the pre-normalisation version and keeps loading
+    old checkpoints. `norm_groups` must divide `channels`.
+    """
+    if norm_groups is None:
+        return nn.Identity()
+    if channels % norm_groups != 0:
+        raise ValueError(
+            f"norm_groups ({norm_groups}) must divide the channel count ({channels})"
+        )
+    return nn.GroupNorm(norm_groups, channels)
+
+
+def createDropout2d(dropout: Optional[float]) -> nn.Module:
+    """Channel dropout for a UNet block, or a no-op when it is disabled.
+
+    Belongs inside the block rather than as a standalone layer in the architecture JSON:
+    `UNetWithSkipConnections` buckets layers by type and applies everything that is not an
+    encoder/decoder/bottleneck *after* the whole decoder, so a `Dropout2d` entry in the JSON
+    lands at the output regardless of where it was written.
+    """
+    if dropout is None or dropout == 0.0:
+        return nn.Identity()
+    if not 0.0 <= dropout < 1.0:
+        raise ValueError(f"dropout must be in [0, 1), got {dropout}")
+    return nn.Dropout2d(dropout)
+
+
 class UNetEncoderBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, downsample: bool = True, block_name: str = ""):
+    def __init__(self, in_channels: int, out_channels: int, downsample: bool = True, block_name: str = "",
+                 norm_groups: Optional[int] = None):
         super().__init__()
         self._block_name = block_name
         self.downsample = downsample
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm1 = createGroupNorm(norm_groups, out_channels)
+        self.norm2 = createGroupNorm(norm_groups, out_channels)
         self.activation = nn.GELU()
 
         self.residual_conv = None
@@ -1350,8 +1401,10 @@ class UNetEncoderBlock(nn.Module):
         residual = x
 
         x = self.conv1(x)
+        x = self.norm1(x)
         x = self.activation(x)
         x = self.conv2(x)
+        x = self.norm2(x)
 
         if self.residual_conv is not None:
             residual = self.residual_conv(residual)
@@ -1368,7 +1421,8 @@ class UNetEncoderBlock(nn.Module):
 
 class UNetDecoderBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, upsample: bool = True,
-                 skip_connection: str = "", block_name: str = ""):
+                 skip_connection: str = "", block_name: str = "",
+                 norm_groups: Optional[int] = None, dropout: Optional[float] = None):
         super().__init__()
         self._skip_connection_name = skip_connection
         self._block_name = block_name
@@ -1381,6 +1435,9 @@ class UNetDecoderBlock(nn.Module):
 
         self.conv1 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm1 = createGroupNorm(norm_groups, out_channels)
+        self.norm2 = createGroupNorm(norm_groups, out_channels)
+        self.dropout = createDropout2d(dropout)
         self.activation = nn.GELU()
 
     def forward(self, x: torch.Tensor, encoder_features: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1395,19 +1452,26 @@ class UNetDecoderBlock(nn.Module):
             x = x + skip_features
 
         x = self.conv1(x)
+        x = self.norm1(x)
         x = self.activation(x)
         x = self.conv2(x)
+        x = self.norm2(x)
         x = self.activation(x)
 
-        return x
+        return self.dropout(x)
 
 
 class UNetBottleneck(nn.Module):
-    def __init__(self, channels: int, bottleneck_channels: int = 512):
+    def __init__(self, channels: int, bottleneck_channels: int = 512,
+                 norm_groups: Optional[int] = None, dropout: Optional[float] = None):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1)
         self.conv3 = nn.Conv2d(bottleneck_channels, channels, kernel_size=3, padding=1)
+        self.norm1 = createGroupNorm(norm_groups, bottleneck_channels)
+        self.norm2 = createGroupNorm(norm_groups, bottleneck_channels)
+        self.norm3 = createGroupNorm(norm_groups, channels)
+        self.dropout = createDropout2d(dropout)
         self.activation = nn.GELU()
 
         self.residual1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=1) if channels != bottleneck_channels else None
@@ -1416,6 +1480,7 @@ class UNetBottleneck(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual1 = x
         x = self.conv1(x)
+        x = self.norm1(x)
         x = self.activation(x)
 
         if self.residual1 is not None:
@@ -1424,17 +1489,19 @@ class UNetBottleneck(nn.Module):
             x = x + residual1
 
         x = self.conv2(x)
+        x = self.norm2(x)
         x = self.activation(x)
 
         residual2 = x
         x = self.conv3(x)
+        x = self.norm3(x)
 
         if self.residual2 is not None:
             residual2 = self.residual2(residual2)
         if residual2.shape == x.shape:
             x = x + residual2
 
-        return self.activation(x)
+        return self.dropout(self.activation(x))
 
 
 class UNetWithSkipConnections(nn.Module):

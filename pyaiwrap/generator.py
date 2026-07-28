@@ -56,7 +56,8 @@ class SubmodularGeneratorCreator(GeneratorCreator):
 
         generator = modular_class(
             pretrained_models_config=submodules,
-            trainable_network=trainable_network
+            trainable_network=trainable_network,
+            concatenate_input=config["CONCATENATE_INPUT"]
         )
         return generator.to(device)
 
