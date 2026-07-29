@@ -976,6 +976,12 @@ class PixelDecoder(nn.Module):
         return pixel_decoder_outputs, final_pixel_spatial
 
 
+# Standard deviation for the color/memory query tables of MultiScaleColorDecoder. Kept at the
+# usual transformer embedding scale: large enough to break the query symmetry immediately,
+# small enough that the first decoder block still starts near its identity behaviour.
+QUERY_EMBEDDING_INIT_STD: float = 0.02
+
+
 class MultiScaleColorDecoder(nn.Module):
     def __init__(self,
                  color_dim: int = 256,
@@ -992,11 +998,19 @@ class MultiScaleColorDecoder(nn.Module):
         self.memory_size = memory_size
         self.num_layers = num_layers
 
+        # Both tables must start off random rather than at zero. Every operation in this
+        # decoder is applied query-wise, so identical rows stay identical the whole way
+        # through the blocks; with zero init all `memory_size` queries emit the same
+        # affinity map, and the only thing that can tell them apart is the per-channel
+        # weights of the downstream smoothing head. Differentiating through that single
+        # weak path leaves the memory collapsed -- measured on the v5 checkpoint, 128
+        # queries spanned an effective rank of ~13. A small random init breaks the symmetry
+        # at step zero, the way Mask2Former initialises its query embeddings.
         self.color_embeddings = nn.Embedding(memory_size, color_dim)
-        nn.init.zeros_(self.color_embeddings.weight)
+        nn.init.trunc_normal_(self.color_embeddings.weight, std=QUERY_EMBEDDING_INIT_STD)
 
         self.memory_embeddings = nn.Embedding(memory_size, color_dim)
-        nn.init.zeros_(self.memory_embeddings.weight)
+        nn.init.trunc_normal_(self.memory_embeddings.weight, std=QUERY_EMBEDDING_INIT_STD)
 
         self.decoder_blocks = nn.ModuleList()
         for i in range(num_layers):
