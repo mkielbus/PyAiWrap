@@ -284,6 +284,14 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
             "AUGMENT": False,
             "AUG_FLIP_P": 0.5,
             "AUG_CROP_SCALE_MIN": 0.6,
+            # null (default) = the crop keeps the source image's aspect ratio, so squaring it
+            # off to IMAGE_RESIZE distorts exactly as much as validation distorts that same
+            # image. Setting a band instead randomises the crop's aspect, which distorts
+            # training differently from validation (measured: matches ~3% of samples); it is
+            # kept only to reproduce runs configured before this default changed, where the
+            # band was 0.85-1.18. Both keys must be set together or both left null.
+            "AUG_RATIO_MIN": None,
+            "AUG_RATIO_MAX": None,
             # Target-side chroma jitter (L5a). AUG_CHROMA_P = 0 disables it, leaving the
             # target unchanged; > 0 scales LAB chroma within the dataset's empirical band.
             # min 1.0 keeps it always additive (never desaturating); max 1.5 stays well
