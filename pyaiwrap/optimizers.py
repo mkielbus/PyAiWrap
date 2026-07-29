@@ -51,15 +51,21 @@ def createParameterGroups(model: nn.Module, weight_decay: float) -> List[Dict[st
 
 
 def resolveOptimizerInput(model_or_parameters: Union[nn.Module, Iterator[Parameter]],
-                          weight_decay: float) -> Any:
+                          weight_decay: float,
+                          no_decay_groups: bool) -> Any:
     """Turn the caller's argument into whatever AdamW should receive.
 
-    Passing a module opts into the decay split above; passing a bare parameter iterator
-    keeps the previous single-group behaviour, so existing callers are unaffected.
+    The split has to be opted into per config, not decided by the argument type. A single
+    training script serves every model family here, so keying the behaviour off "a module
+    was passed" would silently re-tune optimizers for configs that were trained without it,
+    and their saved one-group optimizer state would no longer load on resume. With
+    `no_decay_groups` off, a module is simply unwrapped into its parameters.
     """
-    if isinstance(model_or_parameters, nn.Module):
+    if not isinstance(model_or_parameters, nn.Module):
+        return model_or_parameters
+    if no_decay_groups:
         return createParameterGroups(model_or_parameters, weight_decay)
-    return model_or_parameters
+    return model_or_parameters.parameters()
 
 
 class OptimizerCreator(ABC):
@@ -91,8 +97,9 @@ class AdamOptimizerCreator(OptimizerCreator):
 class AdamWOptimizerCreator(OptimizerCreator):
     def createOptimizer(self, parameters, config: Config) -> torch.optim.Optimizer:
         weight_decay = config["WEIGHT_DECAY"]
+        no_decay_groups = config.get("NO_DECAY_GROUPS", False)
         return torch.optim.AdamW(
-            resolveOptimizerInput(parameters, weight_decay),
+            resolveOptimizerInput(parameters, weight_decay, no_decay_groups),
             lr=config["LEARNING_RATE"],
             weight_decay=weight_decay,
             betas=(
@@ -103,7 +110,9 @@ class AdamWOptimizerCreator(OptimizerCreator):
 
     def getDescription(self, config: Config) -> str:
         weight_decay = config["WEIGHT_DECAY"]
-        return f"Using AdamW optimizer with weight decay: {weight_decay}"
+        scope = ("weights only (norms/biases/embeddings excluded)"
+                 if config.get("NO_DECAY_GROUPS", False) else "all parameters")
+        return f"Using AdamW optimizer with weight decay: {weight_decay} on {scope}"
 
 
 class OptimizerFactory:

@@ -445,7 +445,11 @@ class AdamWOptimizerConfigBuilder(ConfigBuilder):
             "LEARNING_RATE": 0.0001,
             "WEIGHT_DECAY": 0.01,
             "B1": 0.9,
-            "B2": 0.999
+            "B2": 0.999,
+            # Opt-in: put norm gains, biases and embeddings in a weight-decay-free group.
+            # Defaults to False so existing configs keep the single-group optimizer they
+            # were trained with, and their saved optimizer state stays loadable on resume.
+            "NO_DECAY_GROUPS": False
         }
 
     def getCategory(self) -> ConfigCategory:

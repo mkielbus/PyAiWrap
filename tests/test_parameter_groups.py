@@ -9,6 +9,7 @@ Naming/style follows the project convention (see CLAUDE.md).
 """
 from typing import Dict, List
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -82,26 +83,84 @@ def testEmptyGroupsAreDropped() -> None:
     assert groups[0]["weight_decay"] == 0.0
 
 
-def testAdamWReceivesTheSplitWhenGivenAModule() -> None:
-    model = _MixedNet()
-    config = {"OPTIMIZER_TYPE": "adamw", "LEARNING_RATE": 1e-4,
-              "WEIGHT_DECAY": 0.05, "B1": 0.9, "B2": 0.999}
+def _adamwConfig(no_decay_groups: bool) -> Dict:
+    return {"OPTIMIZER_TYPE": "adamw", "LEARNING_RATE": 1e-4, "WEIGHT_DECAY": 0.05,
+            "B1": 0.9, "B2": 0.999, "NO_DECAY_GROUPS": no_decay_groups}
 
-    optimizer = createOptimizer(model, config)
+
+def testAdamWSplitsOnlyWhenTheConfigAsksForIt() -> None:
+    optimizer = createOptimizer(_MixedNet(), _adamwConfig(no_decay_groups=True))
 
     assert len(optimizer.param_groups) == 2
     assert sorted(group["weight_decay"] for group in optimizer.param_groups) == [0.0, 0.05]
 
 
-def testParameterIteratorKeepsSingleGroupBehaviour() -> None:
-    model = _MixedNet()
-    config = {"OPTIMIZER_TYPE": "adamw", "LEARNING_RATE": 1e-4,
-              "WEIGHT_DECAY": 0.05, "B1": 0.9, "B2": 0.999}
-
-    optimizer = createOptimizer(model.parameters(), config)
+def testModuleKeepsSingleGroupWhenFlagIsOff() -> None:
+    """A module argument must not by itself change behaviour: one training script serves
+    every config here, so the old ones have to keep the optimizer they were trained with."""
+    optimizer = createOptimizer(_MixedNet(), _adamwConfig(no_decay_groups=False))
 
     assert len(optimizer.param_groups) == 1
     assert optimizer.param_groups[0]["weight_decay"] == 0.05
+
+
+def testMissingFlagDefaultsToOldBehaviour() -> None:
+    config = _adamwConfig(no_decay_groups=False)
+    del config["NO_DECAY_GROUPS"]
+
+    optimizer = createOptimizer(_MixedNet(), config)
+
+    assert len(optimizer.param_groups) == 1
+
+
+def testParameterIteratorKeepsSingleGroupBehaviour() -> None:
+    model = _MixedNet()
+
+    optimizer = createOptimizer(model.parameters(), _adamwConfig(no_decay_groups=True))
+
+    assert len(optimizer.param_groups) == 1
+    assert optimizer.param_groups[0]["weight_decay"] == 0.05
+
+
+def testOldCheckpointStillResumesWithFlagOff() -> None:
+    """The regression that matters: train.py resumes automatically whenever a training
+    state file exists, so a one-group state dict must keep loading."""
+    model = _MixedNet()
+    saved = createOptimizer(model.parameters(), _adamwConfig(no_decay_groups=False)).state_dict()
+
+    resumed = createOptimizer(model, _adamwConfig(no_decay_groups=False))
+    resumed.load_state_dict(saved)  # must not raise
+
+    assert len(resumed.param_groups) == 1
+
+
+def testConstructorWeightDecayDoesNotOverrideTheGroups() -> None:
+    """The behavioural invariant, not just the bookkeeping one.
+
+    AdamW's `weight_decay=` argument is a default: add_param_group only fills in keys a
+    group has not already set, and step() reads group["weight_decay"] per group. Checked by
+    effect rather than by inspection -- with grad set to zeros the decoupled decay is the
+    only thing that can move a parameter, so a decayed weight must shrink by exactly
+    (1 - lr * wd) while an excluded one must not move at all.
+    """
+    model = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4))
+    for parameter in model.parameters():
+        parameter.grad = torch.zeros_like(parameter)  # zeros, not None: AdamW skips None
+        with torch.no_grad():
+            parameter.fill_(1.0)
+
+    learning_rate = 0.1
+    weight_decay = 0.5
+    optimizer = createOptimizer(model, {"OPTIMIZER_TYPE": "adamw",
+                                        "LEARNING_RATE": learning_rate,
+                                        "WEIGHT_DECAY": weight_decay,
+                                        "B1": 0.9, "B2": 0.999,
+                                        "NO_DECAY_GROUPS": True})
+    optimizer.step()
+
+    assert model[0].weight[0, 0].item() == pytest.approx(1.0 - learning_rate * weight_decay)
+    assert model[0].bias[0].item() == 1.0
+    assert model[1].weight[0].item() == 1.0
 
 
 def testColorQueriesStartDistinct() -> None:
