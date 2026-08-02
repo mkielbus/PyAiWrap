@@ -285,3 +285,39 @@ def testLuminanceEncoderProjectsToRequestedWidths() -> None:
 def testLuminanceEncoderRejectsWrongStageCount() -> None:
     with pytest.raises(ValueError, match="one entry per backbone stage"):
         PretrainedLuminanceEncoder(pretrained=False, stage_channels=[96, 256])
+
+
+def testSemanticEncoderReadsTheConfiguredChannel() -> None:
+    """The luminance channel is a declared coupling, not an assumption the model can check."""
+    torch.manual_seed(0)
+    unet: UNetWithSkipConnections = UNetWithSkipConnections(
+        buildUNetLayersConfig(semantic_channels=16),
+        semantic_encoder={"out_channels": 16, "output_stride": 8, "norm_groups": 4,
+                          "pretrained": False},
+        semantic_input_channel=2
+    )
+    unet.eval()
+    captured: Dict[str, torch.Tensor] = {}
+    original = unet.semantic_encoder.forward
+
+    def spy(luminance: torch.Tensor) -> torch.Tensor:
+        captured["input"] = luminance.detach().clone()
+        return original(luminance)
+
+    unet.semantic_encoder.forward = spy
+    model_input: torch.Tensor = torch.rand(2, 4, 64, 64)
+    with torch.no_grad():
+        unet(model_input)
+
+    assert torch.equal(captured["input"], model_input[:, 2:3])
+
+
+def testSemanticInputChannelOutOfRangeIsRejected() -> None:
+    unet: UNetWithSkipConnections = UNetWithSkipConnections(
+        buildUNetLayersConfig(semantic_channels=16),
+        semantic_encoder={"out_channels": 16, "output_stride": 8, "norm_groups": 4,
+                          "pretrained": False},
+        semantic_input_channel=9
+    )
+    with pytest.raises(ValueError, match="out of range"):
+        unet(torch.rand(2, 4, 64, 64))

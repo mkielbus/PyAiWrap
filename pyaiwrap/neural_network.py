@@ -1746,15 +1746,22 @@ class UNetBottleneck(nn.Module):
 
 class UNetWithSkipConnections(nn.Module):
     def __init__(self, layers_config: List[Dict[str, Any]],
-                 semantic_encoder: Optional[Dict[str, Any]] = None):
+                 semantic_encoder: Optional[Dict[str, Any]] = None,
+                 semantic_input_channel: int = 0):
         """
         semantic_encoder: constructor kwargs for PretrainedSemanticEncoder, or None to build a
-            plain UNet. When given, the encoder runs on channel 0 of the input -- which the
-            colorization models carry as pristine luminance -- and its fused feature map is
-            concatenated onto the bottleneck input. The matching UNetBottleneck must declare
-            the same width via semantic_channels.
+            plain UNet. When given, its fused feature map is concatenated onto the bottleneck
+            input, and the matching UNetBottleneck must declare the same width via
+            semantic_channels.
+        semantic_input_channel: which input channel carries the pristine luminance the semantic
+            encoder is to run on. Explicit rather than assumed, because nothing downstream can
+            detect a wrong choice: the backbone will happily consume a predicted red channel
+            and produce plausible-looking features. For rgb_merge the input is
+            [luminance, R, G, B] and the answer is 0, but that holds only while
+            CONCATENATE_INPUT is on -- with it off channel 0 is a colour prediction instead.
         """
         super().__init__()
+        self.semantic_input_channel = semantic_input_channel
         self.encoder_blocks = nn.ModuleDict()
         self.decoder_blocks = nn.ModuleDict()
         self.other_layers = nn.ModuleList()
@@ -1784,10 +1791,16 @@ class UNetWithSkipConnections(nn.Module):
         encoder_features = {}
 
         # Run before the encoder consumes x: the semantic branch needs the pristine luminance
-        # channel, which for the colorization models is channel 0 of the network input.
-        semantic_features = (
-            self.semantic_encoder(x[:, 0:1]) if self.semantic_encoder is not None else None
-        )
+        # channel of the network input (see semantic_input_channel).
+        semantic_features = None
+        if self.semantic_encoder is not None:
+            channel = self.semantic_input_channel
+            if channel >= x.shape[1]:
+                raise ValueError(
+                    f"semantic_input_channel {channel} is out of range for an input with "
+                    f"{x.shape[1]} channels"
+                )
+            semantic_features = self.semantic_encoder(x[:, channel:channel + 1])
 
         for name, encoder_block in self.encoder_blocks.items():
             x = encoder_block(x)
