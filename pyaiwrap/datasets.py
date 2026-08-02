@@ -40,7 +40,8 @@ class PairedImageFolder(Dataset):
                  target_transform: Callable,
                  segmentation_pairing: Optional[str] = None,
                  shared_augmentation: Optional[Callable] = None,
-                 target_augmentation: Optional[Callable] = None) -> None:
+                 target_augmentation: Optional[Callable] = None,
+                 input_augmentation: Optional[Callable] = None) -> None:
         """
         images_folder_path: path to folder with images
         input_transform: transform producing the model input from a PIL image
@@ -55,6 +56,11 @@ class PairedImageFolder(Dataset):
         target_augmentation: optional callable applied to the target branch only, after the
             shared geometric augmentation (train-time photometric augmentation, e.g. chroma
             jitter). Keeps the input pristine, so recomputed luminance is unaffected.
+        input_augmentation: optional callable applied to the input branch only, after the
+            shared geometric augmentation (train-time tone jitter). The mirror image of
+            target_augmentation: the target keeps its true colours while the input's luminance
+            is perturbed, which regularises without changing what is being learnt. The two are
+            sampled independently, so a sample may receive either, both or neither.
 
         The image is decoded once (single ImageFolder with transform=None), which removes the
         previous double-decode and makes the input/target pairing correct by construction.
@@ -71,6 +77,7 @@ class PairedImageFolder(Dataset):
         self._target_transform: Callable = target_transform
         self._shared_augmentation: Optional[Callable] = shared_augmentation
         self._target_augmentation: Optional[Callable] = target_augmentation
+        self._input_augmentation: Optional[Callable] = input_augmentation
 
         self._edges_dataset: Optional[EdgesDataset] = None
         if segmentation_pairing is not None:
@@ -128,7 +135,11 @@ class PairedImageFolder(Dataset):
         if self._target_augmentation is not None:
             target_image = self._applyTargetAugmentation(image, idx)  # target-side aug only
 
-        model_input: torch.Tensor = self._input_transform(image)
+        input_image = image
+        if self._input_augmentation is not None:
+            input_image = self._input_augmentation(image)  # input-side aug only
+
+        model_input: torch.Tensor = self._input_transform(input_image)
         target: torch.Tensor = self._target_transform(target_image)
 
         if self._edges_dataset is not None:

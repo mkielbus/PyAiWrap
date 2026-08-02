@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Callable, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import convnext_tiny, ConvNeXt_Tiny_Weights
 import sys
 import math
 import json
@@ -771,6 +772,180 @@ def createLayersFromConfig(architecture: List[Dict], custom_module: Optional[nn.
     return nn.Sequential(*layers)
 
 
+# torchvision's convnext_tiny.features interleaves downsampling layers with block stacks; these
+# are the indices whose output ends a stage, i.e. the 1/4, 1/8, 1/16 and 1/32 feature maps.
+CONVNEXT_TINY_STAGE_INDICES: Tuple[int, ...] = (1, 3, 5, 7)
+CONVNEXT_TINY_STAGE_CHANNELS: Tuple[int, ...] = (96, 192, 384, 768)
+IMAGENET_MEAN: Tuple[float, float, float] = (0.485, 0.456, 0.406)
+IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+
+class FrozenConvNextBackbone(nn.Module):
+    """ImageNet-pretrained ConvNeXt-Tiny run on luminance, frozen, returning its four stages.
+
+    Supplies the semantic knowledge both colorization models lack. Measured on this dataset,
+    the residual error of rgb_merge_unet_v5 and color_memory_transformer v6 is neither
+    desaturation (predicted/target within-image ab std ratio 1.007) nor luminance error (mean
+    |dL*| = 0.99) but hue assignment -- the models do not know what the regions they are
+    colouring are. A backbone trained on far more images than this corpus contains is the
+    cheapest source of that knowledge, and being frozen it also removes rather than adds
+    degrees of freedom, which is the right direction for a model whose clean-train LPIPS
+    (0.0975) already sits well below its validation LPIPS (0.1357).
+    """
+
+    def __init__(self, pretrained: bool = True) -> None:
+        super().__init__()
+        weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
+        self._features = convnext_tiny(weights=weights).features
+        for parameter in self._features.parameters():
+            parameter.requires_grad = False
+        self._features.eval()
+
+        self.register_buffer("_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
+
+    def train(self, mode: bool = True) -> "FrozenConvNextBackbone":
+        """Keep the backbone in eval mode whatever the parent does.
+
+        convnext_tiny carries stochastic depth (p = 0.1). Left in train mode it would randomly
+        drop blocks of a network that is supposed to be a fixed feature extractor, making its
+        output non-deterministic and different between the train and validation passes.
+        """
+        super().train(mode)
+        self._features.eval()
+        return self
+
+    def getStageChannels(self) -> List[int]:
+        return list(CONVNEXT_TINY_STAGE_CHANNELS)
+
+    def forward(self, luminance: torch.Tensor) -> List[torch.Tensor]:
+        """luminance: [B, 1, H, W] in [0, 1]. Returns the 1/4, 1/8, 1/16 and 1/32 feature maps."""
+        if luminance.shape[1] != 1:
+            raise ValueError(
+                f"FrozenConvNextBackbone expects a single luminance channel, got "
+                f"{luminance.shape[1]}"
+            )
+
+        normalized = (luminance.repeat(1, 3, 1, 1) - self._mean) / self._std
+
+        stage_outputs: List[torch.Tensor] = []
+        current = normalized
+        # no_grad, not just requires_grad=False: the activations of a frozen branch never need
+        # to be kept for backward, which is what keeps the memory cost at ~0.7 GiB at batch 16.
+        with torch.no_grad():
+            for index, stage in enumerate(self._features):
+                current = stage(current)
+                if index in CONVNEXT_TINY_STAGE_INDICES:
+                    stage_outputs.append(current)
+        return stage_outputs
+
+
+class PretrainedSemanticEncoder(nn.Module):
+    """Fuse a frozen backbone's feature pyramid into one map, for injection into a UNet.
+
+    Produced at a single resolution (`output_stride`, default 8) because that is where the
+    correction pays. Splitting rgb_merge_unet_v5's predicted chroma into a base band at 1/8
+    resolution and the detail above it and crossing the bands with its own frozen extractors'
+    output showed 56% of what the merge network buys lives in the base band and 7% in the
+    detail band, so a second, finer injection point would target the 7%.
+
+    The backbone is frozen; the lateral projections and the fusing convolution are trained.
+    """
+
+    def __init__(self, out_channels: int = 128, output_stride: int = 8,
+                 norm_groups: int = 8, pretrained: bool = True) -> None:
+        super().__init__()
+        if out_channels % norm_groups != 0:
+            raise ValueError(
+                f"norm_groups ({norm_groups}) must divide out_channels ({out_channels})"
+            )
+
+        self.out_channels = out_channels
+        self.output_stride = output_stride
+        self.backbone = FrozenConvNextBackbone(pretrained=pretrained)
+
+        self.lateral_projections = nn.ModuleList([
+            nn.Conv2d(stage_channels, out_channels, kernel_size=1)
+            for stage_channels in self.backbone.getStageChannels()
+        ])
+        self.fuse = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(norm_groups, out_channels),
+            nn.GELU()
+        )
+
+    def forward(self, luminance: torch.Tensor) -> torch.Tensor:
+        """luminance: [B, 1, H, W]. Returns [B, out_channels, H / stride, W / stride]."""
+        stage_outputs = self.backbone(luminance)
+
+        height = luminance.shape[-2] // self.output_stride
+        width = luminance.shape[-1] // self.output_stride
+
+        fused: Optional[torch.Tensor] = None
+        for projection, stage_output in zip(self.lateral_projections, stage_outputs):
+            lateral = projection(stage_output.float())
+            if lateral.shape[-2:] != (height, width):
+                lateral = F.interpolate(lateral, size=(height, width),
+                                        mode="bilinear", align_corners=False)
+            fused = lateral if fused is None else fused + lateral
+
+        return self.fuse(fused)
+
+
+class PretrainedLuminanceEncoder(nn.Module):
+    """Drop-in replacement for LuminanceEncoder backed by a frozen ImageNet backbone.
+
+    ConvNeXt-Tiny's stage pyramid has exactly the geometry ColorMemoryTransformer's
+    PixelDecoder already expects from luminance_encoder_v3 -- four levels, 2x apart, starting
+    at 1/4 -- so nothing downstream needs modifying: PixelDecoder sizes itself from
+    getDownsampleChannels().
+
+    `stage_channels` exists because the widths do differ ([96, 192, 384, 768] against the
+    from-scratch encoder's [96, 256, 256, 512]) and PixelDecoder's parameter count follows
+    them: handing it the raw ConvNeXt widths grows the decoder by ~10M parameters, which would
+    confound "semantics from ImageNet instead of from scratch" with "a bigger decoder" in any
+    comparison against the previous version. Passing the old widths inserts a trained 1x1
+    projection per stage and leaves the rest of the network parameter-identical. None passes
+    the backbone's own widths straight through.
+    """
+
+    def __init__(self, pretrained: bool = True,
+                 stage_channels: Optional[List[int]] = None) -> None:
+        super().__init__()
+        self.backbone = FrozenConvNextBackbone(pretrained=pretrained)
+        backbone_channels = self.backbone.getStageChannels()
+
+        if stage_channels is not None and len(stage_channels) != len(backbone_channels):
+            raise ValueError(
+                f"stage_channels must have one entry per backbone stage "
+                f"({len(backbone_channels)}), got {len(stage_channels)}"
+            )
+
+        self._stage_channels: List[int] = (
+            list(stage_channels) if stage_channels is not None else backbone_channels
+        )
+        self.stage_projections: Optional[nn.ModuleList] = None
+        if stage_channels is not None:
+            self.stage_projections = nn.ModuleList([
+                nn.Conv2d(in_channels, out_channels, kernel_size=1)
+                if in_channels != out_channels else nn.Identity()
+                for in_channels, out_channels in zip(backbone_channels, self._stage_channels)
+            ])
+
+    def getDownsampleChannels(self) -> List[int]:
+        return list(self._stage_channels)
+
+    def getNumDownsampleLayers(self) -> int:
+        return len(self._stage_channels)
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        stage_outputs = [stage_output.float() for stage_output in self.backbone(x)]
+        if self.stage_projections is None:
+            return stage_outputs
+        return [projection(stage_output)
+                for projection, stage_output in zip(self.stage_projections, stage_outputs)]
+
+
 class LuminanceEncoder(nn.Module):
     def __init__(self, encoder_module: Optional[nn.Module] = None, config_path: Optional[str] = None):
         super().__init__()
@@ -1111,14 +1286,26 @@ class ColorMemoryTransformer(nn.Module):
                  memory_size: int = 256,
                  smoothing_config_path: str = None,
                  encoder_module: Optional[nn.Module] = None,
-                 encoder_config_path: str = None):
+                 encoder_config_path: str = None,
+                 pretrained_encoder: Optional[str] = None,
+                 pretrained_encoder_stage_channels: Optional[List[int]] = None):
+        """
+        pretrained_encoder: name of a frozen ImageNet backbone to use as the luminance encoder
+            ("convnext_tiny"), replacing the from-scratch encoder built from
+            encoder_config_path. None keeps the historical behaviour.
+        pretrained_encoder_stage_channels: per-stage widths the backbone's features are
+            projected to before the decoder sees them; see PretrainedLuminanceEncoder.
+        """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.memory_size = memory_size
         self.color_decoder_layers = color_decoder_layers
 
-        self.luminance_encoder = LuminanceEncoder(encoder_module, encoder_config_path)
+        self.luminance_encoder = self._buildLuminanceEncoder(
+            pretrained_encoder, encoder_module, encoder_config_path,
+            pretrained_encoder_stage_channels
+        )
         encoder_channels = self.luminance_encoder.getDownsampleChannels()
 
         self.pixel_decoder = PixelDecoder(
@@ -1143,6 +1330,20 @@ class ColorMemoryTransformer(nn.Module):
         )
 
         self.smoothing_layers = self.loadSmoothingNetwork(smoothing_config_path)
+
+    @staticmethod
+    def _buildLuminanceEncoder(pretrained_encoder: Optional[str],
+                               encoder_module: Optional[nn.Module],
+                               encoder_config_path: Optional[str],
+                               stage_channels: Optional[List[int]]) -> nn.Module:
+        """Pick the frozen pretrained encoder or the from-scratch one built from JSON."""
+        if pretrained_encoder is None:
+            return LuminanceEncoder(encoder_module, encoder_config_path)
+        if pretrained_encoder != "convnext_tiny":
+            raise ValueError(
+                f"unsupported pretrained_encoder {pretrained_encoder!r}, expected 'convnext_tiny'"
+            )
+        return PretrainedLuminanceEncoder(stage_channels=stage_channels)
 
     def loadSmoothingNetwork(self, config_path: str) -> nn.Module:
         if config_path is None:
@@ -1477,9 +1678,19 @@ class UNetDecoderBlock(nn.Module):
 
 class UNetBottleneck(nn.Module):
     def __init__(self, channels: int, bottleneck_channels: int = 512,
-                 norm_groups: Optional[int] = None, dropout: Optional[float] = None):
+                 norm_groups: Optional[int] = None, dropout: Optional[float] = None,
+                 semantic_channels: int = 0):
+        """
+        semantic_channels: width of the semantic feature map concatenated onto the bottleneck
+            input by UNetWithSkipConnections. 0 (the default) leaves the block numerically
+            identical to the version without semantic injection, so old checkpoints load.
+            The block's OUTPUT width stays `channels` either way, so the decoder is unaffected.
+        """
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=3, padding=1)
+        self.semantic_channels = semantic_channels
+        input_channels = channels + semantic_channels
+
+        self.conv1 = nn.Conv2d(input_channels, bottleneck_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1)
         self.conv3 = nn.Conv2d(bottleneck_channels, channels, kernel_size=3, padding=1)
         self.norm1 = createGroupNorm(norm_groups, bottleneck_channels)
@@ -1488,10 +1699,25 @@ class UNetBottleneck(nn.Module):
         self.dropout = createDropout2d(dropout)
         self.activation = nn.GELU()
 
-        self.residual1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=1) if channels != bottleneck_channels else None
+        self.residual1 = nn.Conv2d(input_channels, bottleneck_channels, kernel_size=1) if input_channels != bottleneck_channels else None
         self.residual2 = nn.Conv2d(bottleneck_channels, channels, kernel_size=1) if bottleneck_channels != channels else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                semantic_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.semantic_channels > 0:
+            if semantic_features is None:
+                raise ValueError(
+                    f"bottleneck was built with semantic_channels={self.semantic_channels} but "
+                    f"received no semantic features"
+                )
+            if semantic_features.shape[-2:] != x.shape[-2:]:
+                raise ValueError(
+                    f"semantic feature map {tuple(semantic_features.shape[-2:])} does not match "
+                    f"the bottleneck resolution {tuple(x.shape[-2:])}; check that the encoder's "
+                    f"total downsampling equals the semantic encoder's output_stride"
+                )
+            x = torch.cat([x, semantic_features], dim=1)
+
         residual1 = x
         x = self.conv1(x)
         x = self.norm1(x)
@@ -1519,12 +1745,25 @@ class UNetBottleneck(nn.Module):
 
 
 class UNetWithSkipConnections(nn.Module):
-    def __init__(self, layers_config: List[Dict[str, Any]]):
+    def __init__(self, layers_config: List[Dict[str, Any]],
+                 semantic_encoder: Optional[Dict[str, Any]] = None):
+        """
+        semantic_encoder: constructor kwargs for PretrainedSemanticEncoder, or None to build a
+            plain UNet. When given, the encoder runs on channel 0 of the input -- which the
+            colorization models carry as pristine luminance -- and its fused feature map is
+            concatenated onto the bottleneck input. The matching UNetBottleneck must declare
+            the same width via semantic_channels.
+        """
         super().__init__()
         self.encoder_blocks = nn.ModuleDict()
         self.decoder_blocks = nn.ModuleDict()
         self.other_layers = nn.ModuleList()
         self.bottleneck = None
+
+        self.semantic_encoder = (
+            PretrainedSemanticEncoder(**semantic_encoder) if semantic_encoder is not None
+            else None
+        )
 
         for layer_config in layers_config:
             layer_type = layer_config["type"]
@@ -1544,12 +1783,18 @@ class UNetWithSkipConnections(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         encoder_features = {}
 
+        # Run before the encoder consumes x: the semantic branch needs the pristine luminance
+        # channel, which for the colorization models is channel 0 of the network input.
+        semantic_features = (
+            self.semantic_encoder(x[:, 0:1]) if self.semantic_encoder is not None else None
+        )
+
         for name, encoder_block in self.encoder_blocks.items():
             x = encoder_block(x)
             encoder_features[name] = encoder_block._skip_features
 
         if self.bottleneck is not None:
-            x = self.bottleneck(x)
+            x = self.bottleneck(x, semantic_features)
 
         for name, decoder_block in self.decoder_blocks.items():
             x = decoder_block(x, encoder_features)

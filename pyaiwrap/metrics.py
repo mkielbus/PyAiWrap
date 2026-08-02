@@ -160,7 +160,11 @@ class BaseMetrics(Metrics):
         for phase in ['train', 'val']:
             for key in self.metric_keys:
                 result_key = f"{phase}_{key}"
-                result[result_key] = [entry[key] for entry in self._history[phase]]
+                # .get, not [key]: a run resumed from a checkpoint written before a metric was
+                # added has epochs that predate it, and those epochs must not break the export.
+                result[result_key] = [
+                    entry.get(key, float('nan')) for entry in self._history[phase]
+                ]
 
         return result
 
@@ -257,9 +261,12 @@ class GeneratorColorizationMetrics(BaseMetrics):
     """Metrics tracking for Generator Colorization training with colorfulness metric"""
 
     def __init__(self, use_colorfulness: bool = False, use_perceptual_loss: bool = True):
+        # *_raw are the unweighted loss terms, tracked alongside the weighted ones so a quality
+        # target can be stated in units that do not move when a loss weight is retuned.
         metric_keys = [
             'total_loss',
-            'reconstruction_loss'
+            'reconstruction_loss',
+            'reconstruction_raw'
         ]
         self._use_colorfulness = use_colorfulness
         if self._use_colorfulness:
@@ -268,7 +275,7 @@ class GeneratorColorizationMetrics(BaseMetrics):
                                 'colorfulness_original'])
         self._use_perceptual_loss = use_perceptual_loss
         if self._use_perceptual_loss:
-            metric_keys.append("perceptual_loss")
+            metric_keys.extend(["perceptual_loss", "perceptual_raw"])
         super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
@@ -292,6 +299,11 @@ class GeneratorColorizationMetrics(BaseMetrics):
                 loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
 
             print(f"Epoch {epoch} [{phase_label}]: {' | '.join(loss_parts)}")
+
+            raw_parts = [f"L1: {metrics_dict['reconstruction_raw']:.6f}"]
+            if self._use_perceptual_loss:
+                raw_parts.append(f"LPIPS: {metrics_dict['perceptual_raw']:.6f}")
+            print(f"            raw (unweighted) - {', '.join(raw_parts)}")
 
             if self._use_colorfulness:
                 print(f"            Colorfulness - Recon: {metrics_dict['colorfulness_recon']:.2f}, "

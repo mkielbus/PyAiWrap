@@ -857,6 +857,72 @@ def createChromaJitter(probability: float = 0.5,
     return ChromaJitter(probability=probability, chroma_min=chroma_min, chroma_max=chroma_max)
 
 
+class LumaJitter(ImageTransform):
+    """Mild tone perturbation of the model INPUT only: gamma, then contrast, then brightness.
+
+    A regulariser against instance memorisation, not a domain-matching measure -- validation
+    and test images are clean, so this deliberately makes training harder than inference. It
+    exists because rgb_merge_unet_v5 reaches 0.0975 LPIPS on the clean training set against
+    0.1357 on validation, a 39% gap that says the network is keying on properties of
+    individual training images; perturbing the exact luminance statistics breaks that index.
+
+    Deliberately restricted to tone-curve changes, with no noise and no compression artefacts:
+    the corpus genuinely contains several digitisations of the same artwork under different
+    tone curves (analysis_results/phase0_v3/version_inventory.csv), so this perturbation stays
+    inside the distribution, whereas sensor noise or JPEG blocking would not and would push
+    the model to discard the fine luminance detail it needs.
+
+    The target is untouched, which keeps the colours being learnt exactly the true ones.
+    """
+
+    def __init__(self, probability: float = 0.5,
+                 gamma_min: float = 0.85, gamma_max: float = 1.18,
+                 contrast: float = 0.08, brightness: float = 0.08) -> None:
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError(f"probability must be in [0, 1], got {probability}")
+        if not 0.0 < gamma_min <= gamma_max:
+            raise ValueError(f"require 0 < gamma_min <= gamma_max, got ({gamma_min}, {gamma_max})")
+        if not 0.0 <= contrast < 1.0:
+            raise ValueError(f"contrast must be in [0, 1), got {contrast}")
+        if not 0.0 <= brightness < 1.0:
+            raise ValueError(f"brightness must be in [0, 1), got {brightness}")
+
+        self.probability: float = probability
+        self.gamma_min: float = gamma_min
+        self.gamma_max: float = gamma_max
+        self.contrast: float = contrast
+        self.brightness: float = brightness
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if not isinstance(img, Image.Image):
+            raise TypeError(f"LumaJitter expects a PIL image, got {type(img)}")
+        if random.random() >= self.probability:
+            return img
+
+        gamma: float = random.uniform(self.gamma_min, self.gamma_max)
+        contrast_factor: float = 1.0 + random.uniform(-self.contrast, self.contrast)
+        brightness_factor: float = 1.0 + random.uniform(-self.brightness, self.brightness)
+
+        # adjust_gamma/adjust_* keep the image in PIL form, so this composes with the rest of
+        # the PIL-stage pipeline without a tensor round trip.
+        jittered: Image.Image = TF.adjust_gamma(img, gamma)
+        jittered = TF.adjust_contrast(jittered, contrast_factor)
+        return TF.adjust_brightness(jittered, brightness_factor)
+
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}(probability={self.probability}, "
+                f"gamma=({self.gamma_min}, {self.gamma_max}), contrast={self.contrast}, "
+                f"brightness={self.brightness})")
+
+
+def createLumaJitter(probability: float = 0.5,
+                     gamma_min: float = 0.85, gamma_max: float = 1.18,
+                     contrast: float = 0.08, brightness: float = 0.08) -> LumaJitter:
+    """Build the input-side tone-jitter augmentation."""
+    return LumaJitter(probability=probability, gamma_min=gamma_min, gamma_max=gamma_max,
+                      contrast=contrast, brightness=brightness)
+
+
 # Color-classification bands, mirroring analysis/extract_colors.py (and
 # analysis_results/extract_colors_config.json) so the version remap operates on exactly the
 # same named colors the version labels were derived from. Hue is in degrees (0-360).

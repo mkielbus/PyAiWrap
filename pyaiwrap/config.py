@@ -299,6 +299,18 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
             "AUG_CHROMA_P": 0.0,
             "AUG_CHROMA_MIN": 1.0,
             "AUG_CHROMA_MAX": 1.5,
+            # Input-side tone jitter (gamma, then contrast, then brightness). AUG_LUMA_P = 0
+            # disables it. A regulariser against memorising individual training images, not a
+            # domain-matching measure: validation stays clean, so this makes training strictly
+            # harder than inference. Bounds are kept to tone-curve changes the corpus itself
+            # contains (the same artwork digitised under different tone curves); noise and
+            # compression artifacts are deliberately absent, being out of distribution for
+            # val/test and liable to make the model discard fine luminance detail.
+            "AUG_LUMA_P": 0.0,
+            "AUG_LUMA_GAMMA_MIN": 0.85,
+            "AUG_LUMA_GAMMA_MAX": 1.18,
+            "AUG_LUMA_CONTRAST": 0.08,
+            "AUG_LUMA_BRIGHTNESS": 0.08,
             # Target-side cluster-version remap (L5b): recolour an image to another colour
             # version observed in its own semantic cluster. AUG_REMAP_P = 0 disables it. Needs
             # the Phase 0 analysis artifacts; images missing from them are passed through, so a

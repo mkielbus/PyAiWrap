@@ -555,10 +555,16 @@ class GeneratorColorizationLoss:
             if gradientClip is not None:
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradientClip)
 
+        # The *_raw entries are the unweighted terms. They are what quality targets should be
+        # stated against: 'perceptual_loss' is perceptual_weight x LPIPS, so its numeric value
+        # silently changes meaning whenever the weight is retuned, while 'perceptual_raw' is
+        # comparable across configs and directly against published LPIPS figures.
         metrics.accumulate({
             'total_loss': totalLoss.item(),
             'reconstruction_loss': reconstructionLoss.item() * self.recon_weight,
+            'reconstruction_raw': reconstructionLoss.item(),
             'perceptual_loss': perceptualLoss.item() * self.perceptual_weight,
+            'perceptual_raw': perceptualLoss.item(),
             'colorfulness_loss': colorfulnessLoss.item() * self.colorfulness_weight,
             'colorfulness_recon': colorfulnessRecon.item(),
             'colorfulness_original': colorfulnessOriginal.item()
