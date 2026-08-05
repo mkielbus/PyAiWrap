@@ -2,7 +2,7 @@ import torch
 import os
 from torchvision.utils import make_grid, save_image
 from typing import Optional, Dict, List, Tuple
-from .transforms import labToRgb, labToRgbForVisualization
+from .transforms import labToRgb, labToRgbForVisualization, luminanceToLabRange
 import numpy as np
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
@@ -235,7 +235,11 @@ class ColorizationVisualizer(VisualizationStrategy):
         modified = images["modified"]
         modified_range = ranges["modified"]
 
-        l_channel = modified * 100.0 if modified_range == "zero_one" else modified
+        # modified is the grey model input, so it needs the sRGB -> L* transfer, not a bare
+        # x100; see transforms.grayToLightness. Distinct from _convertLab, whose "zero_one" L
+        # really is L*/100 and is therefore still scaled arithmetically.
+        l_channel = (luminanceToLabRange(modified, "srgb")
+                     if modified_range == "zero_one" else modified)
 
         return {
             "original": self.converter.convert(
@@ -256,7 +260,11 @@ class ColorizationVisualizer(VisualizationStrategy):
         modified = images["modified"]
         modified_range = ranges["modified"]
 
-        l_channel = modified * 100.0 if modified_range == "zero_one" else modified
+        # modified is the grey model input, so it needs the sRGB -> L* transfer, not a bare
+        # x100; see transforms.grayToLightness. Distinct from _convertLab, whose "zero_one" L
+        # really is L*/100 and is therefore still scaled arithmetically.
+        l_channel = (luminanceToLabRange(modified, "srgb")
+                     if modified_range == "zero_one" else modified)
 
         return {
             "original": self.converter.convert(

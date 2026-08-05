@@ -624,7 +624,20 @@ class PerceptualLossConfigBuilder(ConfigBuilder):
         return {
             "PERCEPTUAL_WEIGHT": 0.1,
             "USE_LPIPS": True,
-            "LPIPS_NET": "alex"
+            "LPIPS_NET": "alex",
+            # How a [0,1] luminance channel becomes the L* that lab_to_rgb expects, for AB
+            # targets. "srgb" is the correct transfer; "linear" is the historical
+            # `luminance * 100`, which renders mid-tones ~3.5 L* too dark and is kept only so
+            # runs configured before the fix stay reproducible. The error cancels inside the
+            # loss (reconstruction and target share the conversion) but not in a gate that
+            # compares against the true image.
+            "LUMINANCE_TRANSFER": "srgb",
+            # Inference-only output corrections, applied by pyaiwrap.inference.colorize and by
+            # the quality gate, never by the training loss. Both default to the identity so a
+            # config that does not mention them behaves exactly as before; tune them on a
+            # held-out slice, never on the split being reported.
+            "INFERENCE_CHROMA_SCALE": 1.0,
+            "INFERENCE_FLIP_TTA": False
         }
 
     def getCategory(self) -> ConfigCategory:

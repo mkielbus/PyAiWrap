@@ -496,6 +496,52 @@ class ExtractABChannelsTo3Channel(ImageTransform):
         return f"{self.__class__.__name__}()"
 
 
+SRGB_GAMMA_THRESHOLD: float = 0.04045
+CIE_EPSILON: float = 216.0 / 24389.0
+
+
+def grayToLightness(gray: torch.Tensor) -> torch.Tensor:
+    """Convert an sRGB grey channel in [0, 1] to CIE L* in [0, 100].
+
+    The colorization input is produced by ToGrayscale, i.e. Rec.601 luma (0.299R + 0.587G +
+    0.114B) computed on gamma-encoded sRGB. CIE L* is a different quantity: it weights the
+    channels differently and applies its own curve to *linear-light* luminance. Feeding the
+    former where Kornia's lab_to_rgb expects the latter -- which `luma * 100` does -- renders
+    mid-tones about 3.5 L* units too dark.
+
+    For a neutral grey R = G = B, so the channel weights drop out and the exact conversion is
+    just linearize-then-apply-the-L*-curve, which is what this does. For a saturated pixel the
+    grey channel is not a function of L* alone and no closed form exists; this stays the best
+    available estimate from a single channel, and is exactly right wherever the pixel is
+    neutral.
+    """
+    linear = torch.where(
+        gray <= SRGB_GAMMA_THRESHOLD,
+        gray / 12.92,
+        ((gray + 0.055) / 1.055).clamp_min(0.0) ** 2.4
+    )
+    curved = torch.where(
+        linear > CIE_EPSILON,
+        linear.clamp_min(0.0) ** (1.0 / 3.0),
+        (24389.0 / 27.0 * linear + 16.0) / 116.0
+    )
+    return (116.0 * curved - 16.0).clamp(0.0, 100.0)
+
+
+def luminanceToLabRange(luminance: torch.Tensor, transfer: str = "srgb") -> torch.Tensor:
+    """Map a [0, 1] luminance channel to the L* range lab_to_rgb expects.
+
+    transfer="srgb" applies the correct sRGB -> L* transfer (see grayToLightness).
+    transfer="linear" reproduces the historical `luminance * 100`, kept so configs written
+    before the fix stay reproducible rather than silently changing meaning.
+    """
+    if transfer == "srgb":
+        return grayToLightness(luminance)
+    if transfer == "linear":
+        return luminance * 100.0
+    raise ValueError(f"unsupported luminance transfer {transfer!r}, expected 'srgb' or 'linear'")
+
+
 def labToRgb(lChannel, abChannels):
     """
     Convert L and AB channels to RGB using Kornia's built-in conversion.

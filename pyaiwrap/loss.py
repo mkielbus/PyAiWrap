@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
-from .transforms import labToRgb, labToRgbForVisualization
+from .transforms import labToRgb, labToRgbForVisualization, luminanceToLabRange
 from monai.losses import DiceCELoss
 
 # Autocast dtypes selectable from a config. bfloat16 keeps fp32's exponent range, so unlike
@@ -448,7 +448,8 @@ class GeneratorColorizationLoss:
         input_channel: str = "RGB",
         target_channel: str = "RGB",
         mixed_precision: bool = False,
-        mixed_precision_dtype: str = "bfloat16"
+        mixed_precision_dtype: str = "bfloat16",
+        luminance_transfer: str = "srgb"
     ):
         """
         Initialize generator loss function.
@@ -473,6 +474,15 @@ class GeneratorColorizationLoss:
                              Backward runs outside the autocast context but inherits the bf16
                              ops recorded in the forward, so the speed/memory win is kept.
             mixed_precision_dtype: "bfloat16" (default, no GradScaler needed) or "float16".
+            luminance_transfer: how the [0,1] luminance channel becomes the L* that lab_to_rgb
+                             expects, for AB/LAB_A/LAB_B targets. "srgb" (default) applies the
+                             correct sRGB -> L* transfer; "linear" reproduces the historical
+                             `luminance * 100`, which renders mid-tones ~3.5 L* too dark. The
+                             error is invisible in this loss -- reconstruction and target go
+                             through the same conversion, so it cancels in the difference LPIPS
+                             sees -- but not in a gate that compares against the true image,
+                             where it cost CMT v7 2.9% of raw LPIPS. Keep "linear" only to
+                             reproduce a run made before the fix.
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.recon_weight = recon_weight
@@ -488,6 +498,10 @@ class GeneratorColorizationLoss:
             raise ValueError(f"mixed_precision_dtype must be one of {sorted(_AUTOCAST_DTYPES)}, "
                              f"got {mixed_precision_dtype!r}")
         self.mixed_precision_dtype = _AUTOCAST_DTYPES[mixed_precision_dtype]
+        if luminance_transfer not in ("srgb", "linear"):
+            raise ValueError(f"luminance_transfer must be 'srgb' or 'linear', "
+                             f"got {luminance_transfer!r}")
+        self.luminance_transfer = luminance_transfer
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
@@ -626,10 +640,10 @@ class GeneratorColorizationLoss:
             # For AB channels, we need L channel to convert to RGB
             if self.input_channel == "luminance" and modified.shape[1] == 1:
                 # Colorization case: use modified (L) + images (AB)
-                return labToRgb(modified * 100.0, images)  # L: [0,1] -> [0,100]
+                return labToRgb(self._toLabLightness(modified), images)
             elif self.input_channel == "RGB" and modified.shape[1] == 3:
                 # AB prediction case: use original image's L + images (AB)
-                l_channel = self._rgb_to_luminance(modified) * 100.0
+                l_channel = self._toLabLightness(self._rgb_to_luminance(modified))
                 return labToRgb(l_channel, images)
             else:
                 # Fallback: use middle-gray L
@@ -644,9 +658,9 @@ class GeneratorColorizationLoss:
 
             if self.input_channel == "luminance" and modified.shape[1] == 1:
                 # Use modified (L) as luminance
-                l_channel = modified * 100.0  # L: [0,1] -> [0,100]
+                l_channel = self._toLabLightness(modified)
             elif self.input_channel == "RGB" and modified.shape[1] == 3:
-                l_channel = self._rgb_to_luminance(modified) * 100.0
+                l_channel = self._toLabLightness(self._rgb_to_luminance(modified))
             else:
                 # Fallback: use middle-gray L
                 l_channel = torch.ones_like(ab_channel) * 50.0  # [0,100] range
@@ -666,6 +680,10 @@ class GeneratorColorizationLoss:
             return torch.cat([torch.zeros_like(images), torch.zeros_like(images), images], dim=1)
         else:
             return images.repeat(1, 3, 1, 1)
+
+    def _toLabLightness(self, luminance):
+        """Map a [0,1] luminance channel into L*, honouring the configured transfer."""
+        return luminanceToLabRange(luminance, self.luminance_transfer)
 
     def _rgb_to_luminance(self, rgb_images):
         """Convert RGB to luminance (L channel) using standard weights"""
