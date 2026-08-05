@@ -106,3 +106,15 @@ def testHistoryExportToleratesEpochsPredatingAMetric() -> None:
     history = metrics.getHistoryLists()
     assert history["train_total_loss"] == [1.0]
     assert len(history["train_perceptual_raw"]) == 1
+
+
+def testGradientNormIsRecordedBeforeClipping() -> None:
+    """A post-clip log reads back as the threshold on every clipped step and says nothing."""
+    from pyaiwrap.metrics import GeneratorColorizationMetrics
+
+    metrics = GeneratorColorizationMetrics(use_colorfulness=True, use_perceptual_loss=True,
+                                           track_gradient_norm=True)
+    assert "gradient_norm" in metrics.metric_keys
+
+    without = GeneratorColorizationMetrics(use_colorfulness=True, use_perceptual_loss=True)
+    assert "gradient_norm" not in without.metric_keys

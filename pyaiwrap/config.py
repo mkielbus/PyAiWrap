@@ -648,7 +648,11 @@ class ColorfulnessLossConfigBuilder(ConfigBuilder):
     def getDefaults(self) -> Dict[str, Any]:
         return {
             "COLORFULNESS_WEIGHT": 0.005,
-            "COLORFULNESS_TARGET": None
+            "COLORFULNESS_TARGET": None,
+            # Rebalanced cross entropy against the ground truth's ab cell, for architectures
+            # carrying a quantized_chroma_head. 0 disables it and leaves the loss byte-identical,
+            # which is also what every architecture without such a head needs.
+            "CLASSIFICATION_WEIGHT": 0.0
         }
 
     def getCategory(self) -> ConfigCategory:

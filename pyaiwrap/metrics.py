@@ -260,7 +260,8 @@ class VAEMetrics(BaseMetrics):
 class GeneratorColorizationMetrics(BaseMetrics):
     """Metrics tracking for Generator Colorization training with colorfulness metric"""
 
-    def __init__(self, use_colorfulness: bool = False, use_perceptual_loss: bool = True):
+    def __init__(self, use_colorfulness: bool = False, use_perceptual_loss: bool = True,
+                 track_gradient_norm: bool = False, use_classification: bool = False):
         # *_raw are the unweighted loss terms, tracked alongside the weighted ones so a quality
         # target can be stated in units that do not move when a loss weight is retuned.
         metric_keys = [
@@ -276,6 +277,15 @@ class GeneratorColorizationMetrics(BaseMetrics):
         self._use_perceptual_loss = use_perceptual_loss
         if self._use_perceptual_loss:
             metric_keys.extend(["perceptual_loss", "perceptual_raw"])
+        # Pre-clip gradient norm, recorded only when clipping is on because that is the only
+        # case where the number decides anything. The validation pass runs without backward and
+        # so contributes 0.0, which accumulate() supplies for any key a phase does not emit.
+        self._use_classification = use_classification
+        if self._use_classification:
+            metric_keys.extend(["classification_loss", "classification_raw"])
+        self._track_gradient_norm = track_gradient_norm
+        if self._track_gradient_norm:
+            metric_keys.append("gradient_norm")
         super().__init__(metric_keys)
 
     def display(self, epoch: int) -> None:
@@ -298,11 +308,17 @@ class GeneratorColorizationMetrics(BaseMetrics):
             if self._use_colorfulness:
                 loss_parts.append(f"Color: {metrics_dict['colorfulness_loss']:.6f}")
 
+            if self._use_classification:
+                loss_parts.append(f"Class: {metrics_dict['classification_loss']:.6f}")
+
             print(f"Epoch {epoch} [{phase_label}]: {' | '.join(loss_parts)}")
 
             raw_parts = [f"L1: {metrics_dict['reconstruction_raw']:.6f}"]
             if self._use_perceptual_loss:
                 raw_parts.append(f"LPIPS: {metrics_dict['perceptual_raw']:.6f}")
+            if self._track_gradient_norm and phase == 'train':
+                raw_parts.append(f"grad norm (pre-clip): "
+                                 f"{metrics_dict['gradient_norm']:.3f}")
             print(f"            raw (unweighted) - {', '.join(raw_parts)}")
 
             if self._use_colorfulness:

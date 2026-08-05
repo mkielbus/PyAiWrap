@@ -7,6 +7,7 @@ import lpips
 from typing import Tuple, Dict, Any, Optional
 from .metrics import Metrics
 from .transforms import labToRgb, labToRgbForVisualization, luminanceToLabRange
+from .neural_network import QuantizedChromaHead
 from monai.losses import DiceCELoss
 
 # Autocast dtypes selectable from a config. bfloat16 keeps fp32's exponent range, so unlike
@@ -449,7 +450,8 @@ class GeneratorColorizationLoss:
         target_channel: str = "RGB",
         mixed_precision: bool = False,
         mixed_precision_dtype: str = "bfloat16",
-        luminance_transfer: str = "srgb"
+        luminance_transfer: str = "srgb",
+        classification_weight: float = 0.0
     ):
         """
         Initialize generator loss function.
@@ -483,6 +485,10 @@ class GeneratorColorizationLoss:
                              sees -- but not in a gate that compares against the true image,
                              where it cost CMT v7 2.9% of raw LPIPS. Keep "linear" only to
                              reproduce a run made before the fix.
+            classification_weight: weight of the rebalanced cross entropy against the ground
+                             truth's ab cell, for generators carrying a QuantizedChromaHead.
+                             0 (default) leaves the loss exactly as it was; the head still
+                             decodes to ab, so the other terms are unaffected either way.
         """
         self.reconstruction_loss_fn = reconstruction_loss_fn
         self.recon_weight = recon_weight
@@ -502,6 +508,7 @@ class GeneratorColorizationLoss:
             raise ValueError(f"luminance_transfer must be 'srgb' or 'linear', "
                              f"got {luminance_transfer!r}")
         self.luminance_transfer = luminance_transfer
+        self.classification_weight = classification_weight
 
         self.perceptual_loss_fn = None
         if use_lpips and perceptual_weight > 0:
@@ -559,21 +566,40 @@ class GeneratorColorizationLoss:
             reconstructedImages, originalImages, modifiedImages
         )
 
+        classificationLoss = torch.tensor(0.0, device=reconstructionLoss.device)
+        if self.classification_weight > 0:
+            head = self._findChromaHead(generator)
+            if head is None:
+                raise ValueError(
+                    "CLASSIFICATION_WEIGHT > 0 but the generator has no QuantizedChromaHead; "
+                    "the architecture needs quantized_chroma_head for this term to mean anything"
+                )
+            classificationLoss = head.classificationLoss(head.last_logits, originalImages)
+
         totalLoss = (self.recon_weight * reconstructionLoss +
                      self.perceptual_weight * perceptualLoss +
-                     self.colorfulness_weight * colorfulnessLoss)
+                     self.colorfulness_weight * colorfulnessLoss +
+                     self.classification_weight * classificationLoss)
 
+        gradientNorm = None
         if torch.is_grad_enabled():
             totalLoss.backward()
 
             if gradientClip is not None:
-                torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=gradientClip)
+                # clip_grad_norm_ returns the norm *before* clipping, which is the only place
+                # it is observable: afterwards every clipped step reads back as exactly the
+                # threshold, so a log of the post-clip value cannot distinguish "clipping never
+                # engages" from "clipping engages on every step and is what sets the effective
+                # learning rate".
+                gradientNorm = torch.nn.utils.clip_grad_norm_(
+                    generator.parameters(), max_norm=gradientClip
+                ).item()
 
         # The *_raw entries are the unweighted terms. They are what quality targets should be
         # stated against: 'perceptual_loss' is perceptual_weight x LPIPS, so its numeric value
         # silently changes meaning whenever the weight is retuned, while 'perceptual_raw' is
         # comparable across configs and directly against published LPIPS figures.
-        metrics.accumulate({
+        accumulated: Dict[str, float] = {
             'total_loss': totalLoss.item(),
             'reconstruction_loss': reconstructionLoss.item() * self.recon_weight,
             'reconstruction_raw': reconstructionLoss.item(),
@@ -582,15 +608,31 @@ class GeneratorColorizationLoss:
             'colorfulness_loss': colorfulnessLoss.item() * self.colorfulness_weight,
             'colorfulness_recon': colorfulnessRecon.item(),
             'colorfulness_original': colorfulnessOriginal.item()
-        })
+        }
+        if self.classification_weight > 0:
+            accumulated['classification_loss'] = (classificationLoss.item()
+                                                  * self.classification_weight)
+            accumulated['classification_raw'] = classificationLoss.item()
+        if gradientNorm is not None:
+            accumulated['gradient_norm'] = gradientNorm
+        metrics.accumulate(accumulated)
 
         return {
             'loss': totalLoss,
             'reconstruction_loss': reconstructionLoss * self.recon_weight,
             'perceptual_loss': perceptualLoss * self.perceptual_weight,
             'colorfulness_loss': colorfulnessLoss * self.colorfulness_weight,
+            'classification_loss': classificationLoss * self.classification_weight,
             'reconstructed_images': reconstructedImages
         }
+
+    @staticmethod
+    def _findChromaHead(generator):
+        """The head lives inside whatever wrapper the generator factory built around it."""
+        for module in generator.modules():
+            if isinstance(module, QuantizedChromaHead):
+                return module
+        return None
 
     def calculateReconstructionLoss(self, reconstructed, original):
         """Calculate reconstruction loss based on channel types"""

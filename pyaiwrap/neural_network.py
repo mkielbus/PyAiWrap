@@ -8,6 +8,8 @@ from torchvision.models import (convnext_tiny, ConvNeXt_Tiny_Weights,
 import sys
 import math
 import json
+import os
+import warnings
 from .utils import sinusoidalPositionalEncoding2D
 
 
@@ -914,6 +916,33 @@ class PretrainedSemanticEncoder(nn.Module):
         return self.fuse(fused)
 
 
+class FilmModulation(nn.Module):
+    """Condition a feature map on a per-image vector by scaling and shifting its channels.
+
+    ColorMemoryTransformer can take the cluster prior as a bias on its colour queries, because
+    it has a query set and the prior is a statement about the image as a whole. A UNet has no
+    such place: its tensors are spatial and every position would have to receive the same
+    vector, which is what concatenating a broadcast vector amounts to -- at the cost of widening
+    every downstream convolution. Feature-wise modulation says the same thing more cheaply: the
+    prior decides which channels of the bottleneck matter and by how much.
+
+    Initialised to the identity (zero scale, zero shift) so that a freshly built model starts
+    exactly where the unconditioned one does and has to learn to use the prior.
+    """
+
+    def __init__(self, condition_dim: int, channels: int) -> None:
+        super().__init__()
+        self.channels = channels
+        self.to_modulation = nn.Linear(condition_dim, channels * 2)
+        nn.init.zeros_(self.to_modulation.weight)
+        nn.init.zeros_(self.to_modulation.bias)
+
+    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        modulation = self.to_modulation(condition)
+        scale, shift = modulation.chunk(2, dim=1)
+        return features * (1.0 + scale[:, :, None, None]) + shift[:, :, None, None]
+
+
 class MultiScaleSemanticEncoder(nn.Module):
     """A frozen backbone's pyramid delivered at several resolutions instead of fused into one.
 
@@ -972,9 +1001,15 @@ class MultiScaleSemanticEncoder(nn.Module):
             for stride in self.output_strides
         })
 
-    def forward(self, luminance: torch.Tensor) -> Dict[int, torch.Tensor]:
-        """luminance: [B, 1, H, W]. Returns {stride: [B, out_channels, H/stride, W/stride]}."""
-        stage_outputs = self.backbone(luminance)
+    def computeStages(self, luminance: torch.Tensor) -> List[torch.Tensor]:
+        """The frozen backbone's raw pyramid, exposed so one forward can serve two consumers.
+
+        The cluster prior reads the same features. Running the backbone twice would double the
+        one genuinely expensive part of this branch for no gain.
+        """
+        return self.backbone(luminance)
+
+    def fusePyramid(self, stage_outputs: List[torch.Tensor]) -> Dict[int, torch.Tensor]:
         laterals = [projection(stage_output.float())
                     for projection, stage_output in zip(self.lateral_projections, stage_outputs)]
 
@@ -996,6 +1031,10 @@ class MultiScaleSemanticEncoder(nn.Module):
 
         return {stride: self.fusions[str(stride)](by_stride[stride])
                 for stride in self.output_strides}
+
+    def forward(self, luminance: torch.Tensor) -> Dict[int, torch.Tensor]:
+        """luminance: [B, 1, H, W]. Returns {stride: [B, out_channels, H/stride, W/stride]}."""
+        return self.fusePyramid(self.computeStages(luminance))
 
 
 class PretrainedLuminanceEncoder(nn.Module):
@@ -1296,7 +1335,8 @@ class ClusterColorPrior(nn.Module):
     """
 
     def __init__(self, feature_dim: int, output_dim: int, num_clusters: int = 98,
-                 temperature: float = 1.0, tables_path: Optional[str] = None) -> None:
+                 temperature: float = 1.0, tables_path: Optional[str] = None,
+                 backbone_variant: Optional[str] = None) -> None:
         """tables_path: a .pt written by analysis/build_cluster_prior.py, or None when the
         tables will arrive from a checkpoint. Either way the values end up in buffers; forward
         refuses to run while they are still zero rather than silently conditioning on nothing.
@@ -1306,6 +1346,7 @@ class ClusterColorPrior(nn.Module):
         self.num_clusters = num_clusters
         self.prior_dim = prior_dim
         self.temperature = temperature
+        self.backbone_variant = backbone_variant
 
         self.register_buffer("feature_mean", torch.zeros(1, feature_dim))
         self.register_buffer("feature_std", torch.ones(1, feature_dim))
@@ -1320,13 +1361,38 @@ class ClusterColorPrior(nn.Module):
         )
 
         if tables_path is not None:
-            tables = torch.load(tables_path, map_location="cpu", weights_only=True)
-            self.loadTables(**tables)
+            # Absent is tolerated, because the tables are also in every checkpoint this model
+            # ever saves: at inference the architecture is built and then immediately overwritten
+            # by load_state_dict, so demanding the build-time file there would make a deployment
+            # depend on a file it does not use. Getting it genuinely wrong is still caught -- the
+            # buffers stay zero and forward refuses to run.
+            if os.path.exists(tables_path):
+                self.loadTables(**torch.load(tables_path, map_location="cpu",
+                                             weights_only=True))
+            else:
+                warnings.warn(
+                    f"cluster prior tables {tables_path!r} not found; the buffers stay zero and "
+                    f"must arrive from a checkpoint, or forward will refuse to run",
+                    RuntimeWarning
+                )
 
     def loadTables(self, feature_mean: torch.Tensor, feature_std: torch.Tensor,
                    head_weight: torch.Tensor, head_bias: torch.Tensor,
-                   color_statistics: torch.Tensor) -> None:
-        """Fill the frozen tables at build time; afterwards they live in the checkpoint."""
+                   color_statistics: torch.Tensor, variant: Optional[str] = None) -> None:
+        """Fill the frozen tables at build time; afterwards they live in the checkpoint.
+
+        The variant check is not redundant with the shape check: ConvNeXt-Tiny and Small have
+        identical stage widths, so a head trained on one loads into the other without a single
+        mismatched dimension and then classifies features from a network it never saw. The
+        symptom would be a prior that simply never helps.
+        """
+        if (variant is not None and self.backbone_variant is not None
+                and variant != self.backbone_variant):
+            raise ValueError(
+                f"cluster prior tables were built on ConvNeXt-{variant} but this model runs "
+                f"ConvNeXt-{self.backbone_variant}. Their stage widths may match, so nothing "
+                f"else would catch this; rebuild the tables with --variant {self.backbone_variant}"
+            )
         for name, value in (("feature_mean", feature_mean), ("feature_std", feature_std),
                             ("head_weight", head_weight), ("head_bias", head_bias),
                             ("color_statistics", color_statistics)):
@@ -1354,17 +1420,152 @@ class ClusterColorPrior(nn.Module):
         return self.projection(posterior @ self.color_statistics)
 
 
+class QuantizedChromaHead(nn.Module):
+    """Predict a distribution over ab cells instead of two numbers, and decode it continuously.
+
+    A regressor can only answer with one colour. Asked for a poster that is red in half the
+    corpus and blue in the other half, the value that minimises its loss is the average, and the
+    average of red and blue is a purple that is wrong for both. Measured on this validation set,
+    73% of the tail images would score better under some rigid rotation of their predicted hue,
+    chosen on pixels the score never saw -- the structure is right and the colour choice is not,
+    which is the failure a distribution can express and a regressor cannot.
+
+    Decoding is the annealed mean: softmax(logits / T) against the cell centres. It is
+    continuous, so the output is not confined to the palette -- measured on ground-truth chroma,
+    snapping to a 10-unit grid costs 0.0507 raw LPIPS while the annealed mean over the same grid
+    costs 0.0047, an order of magnitude less than the gain being chased.
+
+    Class rebalancing exists because the corpus is warm: one cell holds 15% of all pixels, so a
+    head trained on raw frequencies learns that betting on sepia almost always pays. The weights
+    follow Zhang et al., mixing the empirical distribution with a uniform one.
+    """
+
+    def __init__(self, in_channels: int, num_bins: int, temperature: float = 0.38,
+                 rebalance_lambda: float = 0.5, encode_sigma: float = 5.0,
+                 encode_neighbours: int = 5, bins_path: Optional[str] = None) -> None:
+        super().__init__()
+        if not 0.0 < temperature <= 1.0:
+            raise ValueError(f"temperature must be in (0, 1], got {temperature}")
+        if not 0.0 <= rebalance_lambda <= 1.0:
+            raise ValueError(f"rebalance_lambda must be in [0, 1], got {rebalance_lambda}")
+
+        self.num_bins = num_bins
+        self.temperature = temperature
+        self.rebalance_lambda = rebalance_lambda
+        self.encode_sigma = encode_sigma
+        self.encode_neighbours = min(encode_neighbours, num_bins)
+
+        self.logits_conv = nn.Conv2d(in_channels, num_bins, kernel_size=3, padding=1)
+        self.register_buffer("bin_centres", torch.zeros(num_bins, 2))
+        self.register_buffer("bin_frequencies", torch.zeros(num_bins))
+        self.register_buffer("class_weights", torch.ones(num_bins))
+
+        if bins_path is not None:
+            if os.path.exists(bins_path):
+                self.loadBins(**torch.load(bins_path, map_location="cpu", weights_only=True))
+            else:
+                warnings.warn(
+                    f"chroma bins {bins_path!r} not found; the palette stays zero and must "
+                    f"arrive from a checkpoint, or forward will refuse to run",
+                    RuntimeWarning
+                )
+
+    def loadBins(self, bin_centres: torch.Tensor, bin_frequencies: torch.Tensor,
+                 bin_size: Optional[float] = None) -> None:
+        if bin_centres.shape != (self.num_bins, 2):
+            raise ValueError(f"bin_centres must have shape {(self.num_bins, 2)}, "
+                             f"got {tuple(bin_centres.shape)}; num_bins in the architecture has "
+                             f"to match the palette file")
+        self.bin_centres.copy_(bin_centres)
+        self.bin_frequencies.copy_(bin_frequencies)
+        self.class_weights.copy_(self._computeClassWeights(bin_frequencies))
+
+    def _computeClassWeights(self, frequencies: torch.Tensor) -> torch.Tensor:
+        mixed = ((1.0 - self.rebalance_lambda) * frequencies
+                 + self.rebalance_lambda / self.num_bins)
+        weights = 1.0 / mixed
+        # Normalised so the expected weight under the data is 1: rebalancing should change which
+        # errors matter, not the overall scale of the loss.
+        return weights / (frequencies * weights).sum().clamp_min(1e-8)
+
+    def _assertLoaded(self) -> None:
+        if not bool(self.bin_centres.any()):
+            raise RuntimeError(
+                "QuantizedChromaHead has no palette: pass bins_path when building a fresh model, "
+                "or load a checkpoint that carries it. Decoding against zeros would return "
+                "neutral for every pixel."
+            )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """features: [B, C, H, W]. Returns ab in [B, 2, H, W], and keeps the logits for the loss."""
+        self._assertLoaded()
+        logits = self.logits_conv(features)
+        self.last_logits = logits
+        return self.decode(logits)
+
+    def decode(self, logits: torch.Tensor) -> torch.Tensor:
+        probabilities = torch.softmax(logits / self.temperature, dim=1)
+        return torch.einsum("bqhw,qc->bchw", probabilities, self.bin_centres)
+
+    def softEncode(self, chroma: torch.Tensor) -> torch.Tensor:
+        """Ground-truth ab as a distribution over the nearest cells, Gaussian-weighted.
+
+        A one-hot target would make every near-miss as wrong as the opposite side of the wheel,
+        which is exactly the distinction this head exists to keep.
+        """
+        self._assertLoaded()
+        batch, _, height, width = chroma.shape
+        flat = chroma.permute(0, 2, 3, 1).reshape(-1, 2)
+        distances = torch.cdist(flat, self.bin_centres)
+        nearest = distances.topk(self.encode_neighbours, dim=1, largest=False)
+        weights = torch.exp(-nearest.values.pow(2) / (2.0 * self.encode_sigma ** 2))
+        weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+        encoded = torch.zeros(flat.shape[0], self.num_bins, device=chroma.device,
+                              dtype=weights.dtype)
+        encoded.scatter_(1, nearest.indices, weights)
+        return encoded.view(batch, height, width, self.num_bins).permute(0, 3, 1, 2)
+
+    def classificationLoss(self, logits: torch.Tensor, chroma: torch.Tensor) -> torch.Tensor:
+        """Rebalanced cross entropy of the logits against the soft-encoded ground truth."""
+        target = self.softEncode(chroma)
+        log_probabilities = torch.log_softmax(logits, dim=1)
+        per_pixel = -(target * log_probabilities).sum(dim=1)
+
+        dominant = target.argmax(dim=1)
+        weights = self.class_weights[dominant]
+        return (per_pixel * weights).mean()
+
+
 class MultiScaleColorDecoder(nn.Module):
     def __init__(self,
                  color_dim: int = 256,
-                 embed_dim: int = 512,
+                 embed_dim: int = 256,
                  output_dim: int = 256,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
                  dropout: float = 0.1,
                  num_layers: int = 6,
                  memory_size: int = 256):
+        """color_dim and embed_dim must be equal; output_dim is free.
+
+        They read like independent widths and the first two are not. The queries are color_dim
+        wide, the attention returns embed_dim, and the two are summed as a residual; the norms
+        and the MLP are then built on embed_dim and applied to that same sum. A mismatch used to
+        surface as a shape error at the first forward pass rather than at construction, which is
+        what the old default pair (256 against 512) produced.
+
+        output_dim only sizes the final projection, so this module is happy with any value; the
+        constraint that ties it to embed_dim belongs to ColorMemoryTransformer, which contracts
+        this output against its pixel features.
+        """
         super().__init__()
+        if color_dim != embed_dim:
+            raise ValueError(
+                f"color_dim ({color_dim}) and embed_dim ({embed_dim}) must be equal: the "
+                f"attention output is summed into the queries as a residual, and the norms and "
+                f"MLP are built on that same width"
+            )
 
         self.embed_dim = embed_dim
         self.memory_size = memory_size
@@ -1482,7 +1683,7 @@ class ScaledTanh(nn.Module):
 class ColorMemoryTransformer(nn.Module):
     def __init__(self,
                  color_dim: int = 256,
-                 embed_dim: int = 512,
+                 embed_dim: int = 256,
                  color_decoder_output_dim: int = 256,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
@@ -1494,13 +1695,18 @@ class ColorMemoryTransformer(nn.Module):
                  encoder_config_path: str = None,
                  pretrained_encoder: Optional[str] = None,
                  pretrained_encoder_stage_channels: Optional[List[int]] = None,
-                 cluster_color_prior: Optional[Dict[str, Any]] = None):
+                 cluster_color_prior: Optional[Dict[str, Any]] = None,
+                 quantized_chroma_head: Optional[Dict[str, Any]] = None):
         """
         pretrained_encoder: name of a frozen ImageNet backbone to use as the luminance encoder
             ("convnext_tiny"), replacing the from-scratch encoder built from
             encoder_config_path. None keeps the historical behaviour.
         pretrained_encoder_stage_channels: per-stage widths the backbone's features are
             projected to before the decoder sees them; see PretrainedLuminanceEncoder.
+        quantized_chroma_head: constructor kwargs for QuantizedChromaHead, replacing the
+            smoothing network's final 2-channel projection with a distribution over ab cells.
+            The smoothing config must then stop at the head's in_channels rather than at 2 --
+            see smoothing_net_v4.json.
         cluster_color_prior: constructor kwargs for ClusterColorPrior, or None to leave the
             colour queries unconditioned. Requires a pretrained encoder, since the prior reads
             the same frozen backbone rather than running a second one.
@@ -1538,7 +1744,19 @@ class ColorMemoryTransformer(nn.Module):
             memory_size=memory_size
         )
 
+        if color_decoder_output_dim != embed_dim:
+            raise ValueError(
+                f"color_decoder_output_dim ({color_decoder_output_dim}) must equal embed_dim "
+                f"({embed_dim}): the colour decoder's output is contracted against the pixel "
+                f"decoder's features, which are embed_dim wide"
+            )
+
         self.smoothing_layers = self.loadSmoothingNetwork(smoothing_config_path)
+
+        self.chroma_head = (
+            QuantizedChromaHead(**quantized_chroma_head)
+            if quantized_chroma_head is not None else None
+        )
 
         self.cluster_color_prior = None
         if cluster_color_prior is not None:
@@ -1549,7 +1767,9 @@ class ColorMemoryTransformer(nn.Module):
                 )
             feature_dim = sum(self.luminance_encoder.backbone.getStageChannels())
             self.cluster_color_prior = ClusterColorPrior(
-                feature_dim=feature_dim, output_dim=color_dim, **cluster_color_prior
+                feature_dim=feature_dim, output_dim=color_dim,
+                backbone_variant=self.luminance_encoder.backbone._variant,
+                **cluster_color_prior
             )
 
     @staticmethod
@@ -1621,6 +1841,12 @@ class ColorMemoryTransformer(nn.Module):
 
         output = torch.einsum("bqc,bchw->bqhw", color_decoder_output, final_pixel_output)  # [batch_size, memory_size, H, W]
         output = self.smoothing_layers(output)  # [batch_size, 1, H, W]
+
+        if self.chroma_head is not None:
+            # The head returns ab like the regression path does, so every consumer downstream --
+            # the loss's LPIPS term, the gate, visualisation -- is unchanged. The logits it kept
+            # are what the classification term reads.
+            output = self.chroma_head(output)
 
         return output
 
@@ -2014,7 +2240,9 @@ class UNetWithSkipConnections(nn.Module):
     def __init__(self, layers_config: List[Dict[str, Any]],
                  semantic_encoder: Optional[Dict[str, Any]] = None,
                  semantic_input_channel: int = 0,
-                 multi_scale_semantic_encoder: Optional[Dict[str, Any]] = None):
+                 multi_scale_semantic_encoder: Optional[Dict[str, Any]] = None,
+                 cluster_color_prior: Optional[Dict[str, Any]] = None,
+                 quantized_chroma_head: Optional[Dict[str, Any]] = None):
         """
         semantic_encoder: constructor kwargs for PretrainedSemanticEncoder, or None to build a
             plain UNet. When given, its fused feature map is concatenated onto the bottleneck
@@ -2025,6 +2253,9 @@ class UNetWithSkipConnections(nn.Module):
             block declaring semantic_channels > 0 is handed the pyramid level matching its own
             resolution, so the encoder's output_strides must cover the strides the decoder
             actually runs at. Mutually exclusive with semantic_encoder.
+        cluster_color_prior: constructor kwargs for ClusterColorPrior, applied to the bottleneck
+            output through FiLM. Requires multi_scale_semantic_encoder, whose frozen backbone it
+            shares rather than running a second one.
         semantic_input_channel: which input channel carries the pristine luminance the semantic
             encoder is to run on. Explicit rather than assumed, because nothing downstream can
             detect a wrong choice: the backbone will happily consume a predicted red channel
@@ -2053,6 +2284,10 @@ class UNetWithSkipConnections(nn.Module):
             if multi_scale_semantic_encoder is not None else None
         )
 
+        self.cluster_color_prior = None
+        self.prior_film = None
+        self._prior_kwargs = cluster_color_prior
+
         for layer_config in layers_config:
             layer_type = layer_config["type"]
             params = layer_config["params"]
@@ -2065,6 +2300,22 @@ class UNetWithSkipConnections(nn.Module):
                 self.decoder_blocks[block_name] = UNetDecoderBlock(**params)
             elif layer_type == "UNetBottleneck":
                 self.bottleneck = UNetBottleneck(**params)
+                if cluster_color_prior is not None:
+                    if self.multi_scale_semantic_encoder is None:
+                        raise ValueError(
+                            "cluster_color_prior needs multi_scale_semantic_encoder: it reads "
+                            "that encoder's frozen backbone instead of running a second one"
+                        )
+                    backbone = self.multi_scale_semantic_encoder.backbone
+                    prior_dim = params.get("channels")
+                    self.cluster_color_prior = ClusterColorPrior(
+                        feature_dim=sum(backbone.getStageChannels()),
+                        output_dim=prior_dim,
+                        backbone_variant=backbone._variant,
+                        **cluster_color_prior
+                    )
+                    self.prior_film = FilmModulation(condition_dim=prior_dim,
+                                                     channels=prior_dim)
             else:
                 self.other_layers.append(NeuralNetworkLayer(layer_config))
 
@@ -2088,6 +2339,7 @@ class UNetWithSkipConnections(nn.Module):
         # channel of the network input (see semantic_input_channel).
         semantic_features = None
         semantic_pyramid: Dict[int, torch.Tensor] = {}
+        color_prior: Optional[torch.Tensor] = None
         if self.semantic_encoder is not None or self.multi_scale_semantic_encoder is not None:
             channel = self.semantic_input_channel
             if channel >= x.shape[1]:
@@ -2099,7 +2351,10 @@ class UNetWithSkipConnections(nn.Module):
             if self.semantic_encoder is not None:
                 semantic_features = self.semantic_encoder(luminance)
             else:
-                semantic_pyramid = self.multi_scale_semantic_encoder(luminance)
+                stages = self.multi_scale_semantic_encoder.computeStages(luminance)
+                semantic_pyramid = self.multi_scale_semantic_encoder.fusePyramid(stages)
+                if self.cluster_color_prior is not None:
+                    color_prior = self.cluster_color_prior(stages)
 
         for name, encoder_block in self.encoder_blocks.items():
             x = encoder_block(x)
@@ -2107,6 +2362,8 @@ class UNetWithSkipConnections(nn.Module):
 
         if self.bottleneck is not None:
             x = self.bottleneck(x, semantic_features)
+            if self.prior_film is not None and color_prior is not None:
+                x = self.prior_film(x, color_prior)
 
         for name, decoder_block in self.decoder_blocks.items():
             # Matched by resolution, not by position: a block that does not upsample shares its

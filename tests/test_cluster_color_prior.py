@@ -128,3 +128,158 @@ def test_transformer_without_prior_is_unchanged() -> None:
     model = ColorMemoryTransformer(**arguments)
     assert model.cluster_color_prior is None
     assert not any("cluster_color_prior" in key for key in model.state_dict())
+
+
+def test_variant_mismatch_is_rejected() -> None:
+    """Tiny and Small share stage widths, so shapes alone cannot catch a swapped backbone."""
+    prior = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                              num_clusters=NUM_CLUSTERS, backbone_variant="small")
+
+    with pytest.raises(ValueError, match="built on ConvNeXt-tiny"):
+        prior.loadTables(**makeTables(), variant="tiny")
+
+
+def test_matching_variant_accepted() -> None:
+    prior = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                              num_clusters=NUM_CLUSTERS, backbone_variant="small")
+    prior.loadTables(**makeTables(), variant="small")
+
+    assert bool(prior.head_weight.any())
+
+
+def test_unlabelled_tables_still_load() -> None:
+    """Tables written before the variant was recorded must not become unusable."""
+    prior = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                              num_clusters=NUM_CLUSTERS, backbone_variant="small")
+    prior.loadTables(**makeTables())
+
+    assert bool(prior.head_weight.any())
+
+
+def buildUnetLayers(bottleneck_channels: int = 16) -> list:
+    """Two downsampling stages, so the bottleneck sits at 1/4 and each decoder block's skip
+    lands at the resolution that block produces."""
+    def encoder(name: str, in_channels: int, out_channels: int) -> Dict[str, object]:
+        return {"type": "UNetEncoderBlock", "params": {
+            "in_channels": in_channels, "out_channels": out_channels,
+            "downsample": True, "block_name": name, "norm_groups": 8}}
+
+    def decoder(name: str, skip: str) -> Dict[str, object]:
+        return {"type": "UNetDecoderBlock", "params": {
+            "in_channels": bottleneck_channels, "out_channels": bottleneck_channels,
+            "upsample": True, "skip_connection": skip, "block_name": name, "norm_groups": 8}}
+
+    return [
+        encoder("enc1", 1, bottleneck_channels),
+        encoder("enc2", bottleneck_channels, bottleneck_channels),
+        {"type": "UNetBottleneck", "params": {"channels": bottleneck_channels,
+                                              "bottleneck_channels": bottleneck_channels,
+                                              "norm_groups": 8}},
+        decoder("dec1", "enc2"),
+        decoder("dec2", "enc1"),
+    ]
+
+
+def test_unet_prior_requires_the_multi_scale_encoder() -> None:
+    from pyaiwrap.neural_network import UNetWithSkipConnections
+
+    with pytest.raises(ValueError, match="needs multi_scale_semantic_encoder"):
+        UNetWithSkipConnections(buildUnetLayers(),
+                                cluster_color_prior={"num_clusters": NUM_CLUSTERS})
+
+
+def test_unet_film_starts_as_the_identity() -> None:
+    """A fresh conditioned model must start exactly where the unconditioned one does."""
+    from pyaiwrap.neural_network import FilmModulation
+
+    film = FilmModulation(condition_dim=8, channels=4)
+    features = torch.rand(2, 4, 3, 3)
+
+    assert torch.allclose(film(features, torch.randn(2, 8)), features)
+
+
+def test_unet_prior_conditions_the_bottleneck() -> None:
+    from pyaiwrap.neural_network import UNetWithSkipConnections
+
+    network = UNetWithSkipConnections(
+        buildUnetLayers(),
+        multi_scale_semantic_encoder={"out_channels": 16, "output_strides": [4],
+                                      "norm_groups": 8, "pretrained": False},
+        cluster_color_prior={"num_clusters": NUM_CLUSTERS},
+        semantic_input_channel=0
+    )
+    network.cluster_color_prior.loadTables(
+        feature_mean=torch.zeros(1, 1440), feature_std=torch.ones(1, 1440),
+        head_weight=torch.randn(NUM_CLUSTERS, 1440), head_bias=torch.zeros(NUM_CLUSTERS),
+        color_statistics=torch.randn(NUM_CLUSTERS, PRIOR_DIM),
+    )
+
+    assert network.prior_film is not None
+    with torch.no_grad():
+        assert network(torch.rand(2, 1, 32, 32)).shape[0] == 2
+
+
+def test_backbone_runs_once_for_pyramid_and_prior() -> None:
+    """Running the frozen backbone twice would double the branch's only expensive part."""
+    from pyaiwrap.neural_network import UNetWithSkipConnections
+
+    network = UNetWithSkipConnections(
+        buildUnetLayers(),
+        multi_scale_semantic_encoder={"out_channels": 16, "output_strides": [4],
+                                      "norm_groups": 8, "pretrained": False},
+        cluster_color_prior={"num_clusters": NUM_CLUSTERS},
+        semantic_input_channel=0
+    )
+    network.cluster_color_prior.loadTables(
+        feature_mean=torch.zeros(1, 1440), feature_std=torch.ones(1, 1440),
+        head_weight=torch.randn(NUM_CLUSTERS, 1440), head_bias=torch.zeros(NUM_CLUSTERS),
+        color_statistics=torch.randn(NUM_CLUSTERS, PRIOR_DIM),
+    )
+
+    backbone = network.multi_scale_semantic_encoder.backbone
+    calls = {"count": 0}
+    original = backbone.forward
+
+    def counting(luminance):
+        calls["count"] += 1
+        return original(luminance)
+
+    backbone.forward = counting
+    with torch.no_grad():
+        network(torch.rand(1, 1, 32, 32))
+
+    assert calls["count"] == 1
+
+
+def test_missing_tables_file_is_tolerated_at_build_time(tmp_path) -> None:
+    """Inference builds the architecture and then overwrites it from the checkpoint, so a
+    build-time file must not be a deployment dependency."""
+    with pytest.warns(RuntimeWarning, match="not found"):
+        prior = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                                  num_clusters=NUM_CLUSTERS,
+                                  tables_path=str(tmp_path / "absent.pt"))
+
+    assert not bool(prior.head_weight.any())
+    with pytest.raises(RuntimeError, match="no tables"):
+        prior(makeStages())
+
+    seeded = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                               num_clusters=NUM_CLUSTERS)
+    seeded.loadTables(**makeTables())
+    prior.load_state_dict(seeded.state_dict())
+
+    assert bool(prior.head_weight.any())
+    with torch.no_grad():
+        assert prior(makeStages()).shape == (2, 16)
+
+
+def test_present_tables_file_is_used(tmp_path) -> None:
+    path = tmp_path / "tables.pt"
+    tables = makeTables()
+    torch.save({**tables, "variant": "small"}, path)
+
+    prior = ClusterColorPrior(feature_dim=FEATURE_DIM, output_dim=16,
+                              num_clusters=NUM_CLUSTERS, backbone_variant="small",
+                              tables_path=str(path))
+
+    assert torch.equal(prior.head_weight, tables["head_weight"])
