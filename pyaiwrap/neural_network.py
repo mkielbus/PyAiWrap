@@ -1442,7 +1442,8 @@ class QuantizedChromaHead(nn.Module):
 
     def __init__(self, in_channels: int, num_bins: int, temperature: float = 0.38,
                  rebalance_lambda: float = 0.5, encode_sigma: float = 5.0,
-                 encode_neighbours: int = 5, bins_path: Optional[str] = None) -> None:
+                 encode_neighbours: int = 5, bins_path: Optional[str] = None,
+                 upsample_factor: int = 1, encode_chunk: int = 131072) -> None:
         super().__init__()
         if not 0.0 < temperature <= 1.0:
             raise ValueError(f"temperature must be in (0, 1], got {temperature}")
@@ -1451,6 +1452,12 @@ class QuantizedChromaHead(nn.Module):
 
         self.num_bins = num_bins
         self.temperature = temperature
+        # Logits are the expensive tensor: Q channels at full resolution and batch 16 is 0.9 GiB
+        # each, and autograd keeps several. Predicting them one octave down and upsampling the
+        # decoded ab costs almost nothing -- ground-truth chroma band-limited to 1/4 scores
+        # 0.031 raw LPIPS against the model's 0.129 -- and divides the head's memory by four.
+        self.upsample_factor = upsample_factor
+        self.encode_chunk = encode_chunk
         self.rebalance_lambda = rebalance_lambda
         self.encode_sigma = encode_sigma
         self.encode_neighbours = min(encode_neighbours, num_bins)
@@ -1501,40 +1508,65 @@ class QuantizedChromaHead(nn.Module):
         self._assertLoaded()
         logits = self.logits_conv(features)
         self.last_logits = logits
-        return self.decode(logits)
+        chroma = self.decode(logits)
+        if self.upsample_factor > 1:
+            chroma = F.interpolate(chroma, scale_factor=self.upsample_factor,
+                                   mode="bilinear", align_corners=False)
+        return chroma
 
     def decode(self, logits: torch.Tensor) -> torch.Tensor:
         probabilities = torch.softmax(logits / self.temperature, dim=1)
         return torch.einsum("bqhw,qc->bchw", probabilities, self.bin_centres)
 
-    def softEncode(self, chroma: torch.Tensor) -> torch.Tensor:
-        """Ground-truth ab as a distribution over the nearest cells, Gaussian-weighted.
+    def softEncode(self, chroma: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Ground-truth ab as its nearest cells and their Gaussian weights, kept sparse.
+
+        Returns (indices, weights), each [N, k] rather than a dense [N, num_bins] map: at
+        256x256 and batch 16 the dense form is 0.9 GiB, and only k of its entries are non-zero.
+        The distances are computed in chunks for the same reason -- the full [N, num_bins]
+        distance matrix is the same size again.
 
         A one-hot target would make every near-miss as wrong as the opposite side of the wheel,
         which is exactly the distinction this head exists to keep.
         """
         self._assertLoaded()
-        batch, _, height, width = chroma.shape
         flat = chroma.permute(0, 2, 3, 1).reshape(-1, 2)
-        distances = torch.cdist(flat, self.bin_centres)
-        nearest = distances.topk(self.encode_neighbours, dim=1, largest=False)
-        weights = torch.exp(-nearest.values.pow(2) / (2.0 * self.encode_sigma ** 2))
-        weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
 
-        encoded = torch.zeros(flat.shape[0], self.num_bins, device=chroma.device,
-                              dtype=weights.dtype)
-        encoded.scatter_(1, nearest.indices, weights)
-        return encoded.view(batch, height, width, self.num_bins).permute(0, 3, 1, 2)
+        index_chunks: List[torch.Tensor] = []
+        weight_chunks: List[torch.Tensor] = []
+        for start in range(0, flat.shape[0], self.encode_chunk):
+            block = flat[start:start + self.encode_chunk]
+            distances = torch.cdist(block, self.bin_centres)
+            nearest = distances.topk(self.encode_neighbours, dim=1, largest=False)
+            weights = torch.exp(-nearest.values.pow(2) / (2.0 * self.encode_sigma ** 2))
+            index_chunks.append(nearest.indices)
+            weight_chunks.append(weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-8))
+
+        return torch.cat(index_chunks), torch.cat(weight_chunks)
 
     def classificationLoss(self, logits: torch.Tensor, chroma: torch.Tensor) -> torch.Tensor:
-        """Rebalanced cross entropy of the logits against the soft-encoded ground truth."""
-        target = self.softEncode(chroma)
-        log_probabilities = torch.log_softmax(logits, dim=1)
-        per_pixel = -(target * log_probabilities).sum(dim=1)
+        """Rebalanced cross entropy of the logits against the soft-encoded ground truth.
 
-        dominant = target.argmax(dim=1)
-        weights = self.class_weights[dominant]
-        return (per_pixel * weights).mean()
+        The target is gathered rather than materialised: cross entropy against a distribution
+        with k non-zero entries needs k terms, not num_bins of which all but k are zero.
+        """
+        if chroma.shape[-2:] != logits.shape[-2:]:
+            # The head may predict one octave below the image; the target follows it down rather
+            # than the logits being upsampled, which would defeat the point of predicting low.
+            chroma = F.interpolate(chroma, size=logits.shape[-2:], mode="bilinear",
+                                   align_corners=False)
+
+        indices, weights = self.softEncode(chroma)
+        log_probabilities = torch.log_softmax(logits, dim=1)
+        flat_log_probabilities = log_probabilities.permute(0, 2, 3, 1).reshape(
+            -1, self.num_bins
+        )
+
+        gathered = torch.gather(flat_log_probabilities, 1, indices)
+        per_pixel = -(weights * gathered).sum(dim=1)
+
+        dominant = indices.gather(1, weights.argmax(dim=1, keepdim=True)).squeeze(1)
+        return (per_pixel * self.class_weights[dominant]).mean()
 
 
 class MultiScaleColorDecoder(nn.Module):

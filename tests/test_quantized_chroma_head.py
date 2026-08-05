@@ -77,14 +77,16 @@ def test_low_temperature_approaches_the_mode() -> None:
 
 
 def test_soft_encoding_is_a_distribution_centred_on_the_truth() -> None:
+    """Returned sparsely -- indices and weights -- because the dense form is 0.9 GiB at the
+    resolution and batch this runs at."""
     head = makeHead()
     chroma = torch.zeros(1, 2, 1, 1)
 
-    encoded = head.softEncode(chroma)
+    indices, weights = head.softEncode(chroma)
 
-    assert encoded.shape == (1, NUM_BINS, 1, 1)
-    assert math.isclose(float(encoded.sum()), 1.0, abs_tol=1e-5)
-    assert int(encoded[0, :, 0, 0].argmax()) == 4  # the (0, 0) cell
+    assert indices.shape == (1, head.encode_neighbours)
+    assert math.isclose(float(weights.sum()), 1.0, abs_tol=1e-5)
+    assert int(indices[0, int(weights[0].argmax())]) == 4  # the (0, 0) cell
 
 
 def test_soft_encoding_beats_one_hot_on_near_misses() -> None:
@@ -92,10 +94,41 @@ def test_soft_encoding_beats_one_hot_on_near_misses() -> None:
     head = makeHead()
     chroma = torch.tensor([[[[2.0]], [[2.0]]]])
 
-    encoded = head.softEncode(chroma)[0, :, 0, 0]
+    indices, weights = head.softEncode(chroma)
+    by_bin = {int(index): float(weight) for index, weight in zip(indices[0], weights[0])}
 
-    assert encoded[4] > encoded[8] > 0.0
-    assert float(encoded[0]) < float(encoded[8])
+    assert by_bin[4] > by_bin[8] > 0.0
+    assert by_bin.get(0, 0.0) < by_bin[8]
+
+
+def test_chunked_encoding_matches_unchunked() -> None:
+    """Chunking is a memory measure and must not change a single weight."""
+    head = makeHead()
+    chroma = torch.randn(2, 2, 8, 8) * 8.0
+
+    head.encode_chunk = 10 ** 9
+    whole_indices, whole_weights = head.softEncode(chroma)
+    head.encode_chunk = 7
+    chunked_indices, chunked_weights = head.softEncode(chroma)
+
+    assert torch.equal(whole_indices, chunked_indices)
+    assert torch.allclose(whole_weights, chunked_weights)
+
+
+def test_target_follows_the_head_down_an_octave() -> None:
+    """With upsample_factor the logits are smaller than the image; the target is resized to the
+    logits rather than the logits being upsampled, which would waste the saving."""
+    head = makeHead(upsample_factor=2)
+    logits = torch.randn(1, NUM_BINS, 4, 4)
+    chroma = torch.randn(1, 2, 8, 8) * 5.0
+
+    assert float(head.classificationLoss(logits, chroma)) > 0.0
+
+
+def test_upsampling_head_returns_image_resolution() -> None:
+    head = makeHead(upsample_factor=2)
+
+    assert head(torch.rand(1, 4, 4, 4)).shape == (1, 2, 8, 8)
 
 
 def test_class_weights_favour_rare_colours_without_changing_scale() -> None:
