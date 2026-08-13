@@ -7,6 +7,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 
+# How many channels of the model input each INPUT_CHANNEL type actually describes. Anything
+# beyond this is conditioning the model was given (segmentation encodings, edge maps), not
+# picture, and must not reach the image conversions.
+INPUT_CHANNEL_COUNTS: Dict[str, int] = {
+    "luminance": 1, "R": 1, "G": 1, "B": 1, "LAB_A": 1, "LAB_B": 1,
+    "AB": 2,
+    "RGB": 3, "LAB": 3, "ab_to_3ch": 3,
+}
+
 
 class VisualizationStrategy(ABC):
     """Abstract base class for visualization strategies."""
@@ -190,7 +199,7 @@ class ColorizationVisualizer(VisualizationStrategy):
                   input_range: str = "auto") -> None:
 
         images = self._prepareImages(
-            original_images, modified_images, reconstructed_images, num_images
+            original_images, modified_images, reconstructed_images, num_images, input_channel
         )
 
         ranges = self._getRanges(images, input_channel, target_channel, input_range)
@@ -199,13 +208,33 @@ class ColorizationVisualizer(VisualizationStrategy):
                                 launch_number, config_id, input_channel, target_channel)
 
     def _prepareImages(self, original: torch.Tensor, modified: torch.Tensor,
-                       reconstructed: torch.Tensor, num_images: int) -> Dict[str, torch.Tensor]:
+                       reconstructed: torch.Tensor, num_images: int,
+                       input_channel: str = "RGB") -> Dict[str, torch.Tensor]:
         """Prepare and extract subset of images."""
         return {
             "original": original.detach().cpu()[:num_images],
-            "modified": modified.detach().cpu()[:num_images],
+            "modified": self._dropConditioningChannels(
+                modified.detach().cpu()[:num_images], input_channel),
             "reconstructed": reconstructed.detach().cpu()[:num_images]
         }
+
+    @staticmethod
+    def _dropConditioningChannels(modified: torch.Tensor, input_channel: str) -> torch.Tensor:
+        """Keep only the channels `input_channel` names, discarding conditioning stacked behind.
+
+        A segmentation-conditioned model is fed [luminance, mask encoding]. Only the luminance
+        is an image; the encoding is a description of one. Rendering it as though it were an
+        image is what produced a 9-channel "grayscale" (3 channels tripled) and killed a run at
+        the first visualisation epoch, five epochs of training after the mistake was made.
+
+        An unknown channel type is passed through untouched: this must never be the reason a
+        training run dies, and a visualisation that looks wrong is a far cheaper failure than
+        one that stops the loop.
+        """
+        expected: Optional[int] = INPUT_CHANNEL_COUNTS.get(input_channel)
+        if expected is None or modified.shape[1] <= expected:
+            return modified
+        return modified[:, :expected]
 
     def _getRanges(self, images: Dict[str, torch.Tensor], input_channel: str,
                    target_channel: str, input_range: str) -> Dict[str, str]:

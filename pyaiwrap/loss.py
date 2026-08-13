@@ -673,19 +673,26 @@ class GeneratorColorizationLoss:
         return colorfulnessLoss, colorfulnessRecon, colorfulnessOriginal
 
     def _convertToRgbForLoss(self, images, modified):
-        """Convert images to RGB for perceptual/colorfulness losses"""
+        """Convert images to RGB for perceptual/colorfulness losses
+
+        `modified` is the model input, and a segmentation-conditioned model's input is
+        [luminance, mask encoding]. Only its leading channels are the picture, so the width
+        tests below are `>=` and the lightness is sliced off the front. They used to be `==`,
+        which for a conditioned AB model fell through to the middle-gray fallback: no error,
+        no crash, just a perceptual loss quietly measured against flat grey lightness.
+        """
         if self.target_channel == "RGB":
             return images
         elif self.target_channel == "luminance":
             return images.repeat(1, 3, 1, 1)
         elif self.target_channel == "AB":
             # For AB channels, we need L channel to convert to RGB
-            if self.input_channel == "luminance" and modified.shape[1] == 1:
+            if self.input_channel == "luminance" and modified.shape[1] >= 1:
                 # Colorization case: use modified (L) + images (AB)
-                return labToRgb(self._toLabLightness(modified), images)
-            elif self.input_channel == "RGB" and modified.shape[1] == 3:
+                return labToRgb(self._toLabLightness(modified[:, :1]), images)
+            elif self.input_channel == "RGB" and modified.shape[1] >= 3:
                 # AB prediction case: use original image's L + images (AB)
-                l_channel = self._toLabLightness(self._rgb_to_luminance(modified))
+                l_channel = self._toLabLightness(self._rgb_to_luminance(modified[:, :3]))
                 return labToRgb(l_channel, images)
             else:
                 # Fallback: use middle-gray L
@@ -698,11 +705,11 @@ class GeneratorColorizationLoss:
             # Single A or B channel in Kornia's native [-127,127] range
             ab_channel = images
 
-            if self.input_channel == "luminance" and modified.shape[1] == 1:
+            if self.input_channel == "luminance" and modified.shape[1] >= 1:
                 # Use modified (L) as luminance
-                l_channel = self._toLabLightness(modified)
-            elif self.input_channel == "RGB" and modified.shape[1] == 3:
-                l_channel = self._toLabLightness(self._rgb_to_luminance(modified))
+                l_channel = self._toLabLightness(modified[:, :1])
+            elif self.input_channel == "RGB" and modified.shape[1] >= 3:
+                l_channel = self._toLabLightness(self._rgb_to_luminance(modified[:, :3]))
             else:
                 # Fallback: use middle-gray L
                 l_channel = torch.ones_like(ab_channel) * 50.0  # [0,100] range
