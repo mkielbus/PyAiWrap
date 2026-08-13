@@ -738,6 +738,41 @@ class ChannelTransformFactory:
             raise ValueError(f"channel_type must be one of {[c.value for c in ChannelType]}, got '{channel_type}'")
 
 
+@dataclass(frozen=True)
+class CropBox:
+    """A crop rectangle together with the frame it was measured in.
+
+    Carrying the source frame's size is what lets the same box be replayed on a raster
+    stored at a different resolution -- the SAM label maps are always 256x256 while the
+    photograph they describe is whatever the scan was -- by rescaling the rectangle
+    proportionally instead of assuming the two share a pixel grid.
+    """
+
+    top: int
+    left: int
+    height: int
+    width: int
+    source_height: int
+    source_width: int
+
+    def rescaleTo(self, height: int, width: int) -> "CropBox":
+        """The same rectangle expressed in a `height` x `width` frame.
+
+        Rounding can push the rectangle a pixel past the edge on very small rasters, so the
+        result is clamped to stay inside the frame and to keep at least one pixel of extent.
+        """
+        vertical_scale: float = height / self.source_height
+        horizontal_scale: float = width / self.source_width
+
+        crop_height: int = max(1, min(height, round(self.height * vertical_scale)))
+        crop_width: int = max(1, min(width, round(self.width * horizontal_scale)))
+        top: int = max(0, min(height - crop_height, round(self.top * vertical_scale)))
+        left: int = max(0, min(width - crop_width, round(self.left * horizontal_scale)))
+
+        return CropBox(top=top, left=left, height=crop_height, width=crop_width,
+                       source_height=height, source_width=width)
+
+
 class AspectPreservingRandomResizedCrop(ImageTransform):
     """Random-area, random-position crop that keeps the source image's aspect ratio.
 
@@ -764,11 +799,13 @@ class AspectPreservingRandomResizedCrop(ImageTransform):
         self.scale_min: float = scale_min
         self.scale_max: float = scale_max
 
-    def __call__(self, img: Image.Image) -> Image.Image:
-        if not isinstance(img, Image.Image):
-            raise TypeError(f"AspectPreservingRandomResizedCrop expects a PIL image, got {type(img)}")
+    def sampleBox(self, width: int, height: int) -> "CropBox":
+        """Draw one crop box for a frame of this size, without touching an image.
 
-        width, height = img.size
+        Split out of __call__ so a second, co-registered raster (a segmentation label map)
+        can be cropped with the very same box; the draw order is unchanged, so calling
+        __call__ still consumes the RNG exactly as it did before.
+        """
         side_fraction: float = math.sqrt(random.uniform(self.scale_min, self.scale_max))
         crop_width: int = max(1, min(width, round(width * side_fraction)))
         crop_height: int = max(1, min(height, round(height * side_fraction)))
@@ -776,7 +813,17 @@ class AspectPreservingRandomResizedCrop(ImageTransform):
         left: int = random.randint(0, width - crop_width)
         top: int = random.randint(0, height - crop_height)
 
-        return TF.resized_crop(img, top, left, crop_height, crop_width,
+        return CropBox(top=top, left=left, height=crop_height, width=crop_width,
+                       source_height=height, source_width=width)
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if not isinstance(img, Image.Image):
+            raise TypeError(f"AspectPreservingRandomResizedCrop expects a PIL image, got {type(img)}")
+
+        width, height = img.size
+        box: CropBox = self.sampleBox(width, height)
+
+        return TF.resized_crop(img, box.top, box.left, box.height, box.width,
                                [self.image_size, self.image_size])
 
 
@@ -819,6 +866,92 @@ def createSharedGeometricAugmentation(image_size: int,
         transforms.RandomHorizontalFlip(p=flip_probability),
         crop
     ])
+
+
+@dataclass(frozen=True)
+class GeometricAugmentationParameters:
+    """One draw of the train-time geometric augmentation: whether to flip, and where to crop."""
+
+    flip: bool
+    crop_box: CropBox
+
+
+class PairedGeometricAugmentation:
+    """createSharedGeometricAugmentation's transform, with its randomness made replayable.
+
+    The composed version samples its flip and its crop box inside `__call__`, which is all the
+    image/target pair needs -- they are two views of one PIL image, so one call augments both.
+    A segmentation label map is a third raster that has to receive the identical geometry, and
+    it is neither a view of that image nor stored at its resolution (SAM writes 256x256 maps
+    for photographs of any size). So the draw is exposed: `sampleParameters` once per item,
+    then `applyToImage` and `applyToMask` replay it.
+
+    The mask is resampled with NEAREST throughout. Label ids are names, not quantities --
+    interpolating between region 3 and region 7 would invent a region 5 that never existed,
+    and it would do so exactly along the object boundaries the mask is there to mark.
+
+    The aspect-ratio band of the composed version is deliberately not offered here: it exists
+    only to reproduce runs configured before the default changed, and no such run has masks.
+    """
+
+    def __init__(self, image_size: int, flip_probability: float = 0.5,
+                 crop_scale_min: float = 0.6, crop_scale_max: float = 1.0) -> None:
+        if not 0.0 <= flip_probability <= 1.0:
+            raise ValueError(f"flip_probability must be in [0, 1], got {flip_probability}")
+        self.image_size: int = image_size
+        self.flip_probability: float = flip_probability
+        self._crop: AspectPreservingRandomResizedCrop = AspectPreservingRandomResizedCrop(
+            image_size, scale_min=crop_scale_min, scale_max=crop_scale_max
+        )
+
+    def sampleParameters(self, width: int, height: int) -> GeometricAugmentationParameters:
+        """Draw the geometry for one item, in the coordinates of a `width` x `height` frame."""
+        flip: bool = random.random() < self.flip_probability
+        return GeometricAugmentationParameters(flip=flip, crop_box=self._crop.sampleBox(width, height))
+
+    def applyToImage(self, img: Image.Image,
+                     parameters: GeometricAugmentationParameters) -> Image.Image:
+        return self._apply(img, parameters, TF.InterpolationMode.BILINEAR)
+
+    def applyToMask(self, mask: Image.Image,
+                    parameters: GeometricAugmentationParameters) -> Image.Image:
+        """Replay the geometry on a label map, whatever resolution it is stored at."""
+        width, height = mask.size
+        rescaled: GeometricAugmentationParameters = GeometricAugmentationParameters(
+            flip=parameters.flip, crop_box=parameters.crop_box.rescaleTo(height, width)
+        )
+        return self._apply(mask, rescaled, TF.InterpolationMode.NEAREST)
+
+    def _apply(self, img: Image.Image, parameters: GeometricAugmentationParameters,
+               interpolation: TF.InterpolationMode) -> Image.Image:
+        if parameters.flip:
+            img = TF.hflip(img)
+        box: CropBox = parameters.crop_box
+        return TF.resized_crop(img, box.top, box.left, box.height, box.width,
+                               [self.image_size, self.image_size], interpolation=interpolation)
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        """Sample and apply in one step, so it can stand in for the composed transform."""
+        width, height = img.size
+        return self.applyToImage(img, self.sampleParameters(width, height))
+
+
+def createPairedGeometricAugmentation(image_size: int,
+                                      flip_probability: float = 0.5,
+                                      crop_scale_min: float = 0.6,
+                                      crop_scale_max: float = 1.0) -> PairedGeometricAugmentation:
+    """The train-time geometric augmentation for a run that also feeds segmentation masks.
+
+    Kept separate from createSharedGeometricAugmentation rather than replacing it: configs
+    without masks keep getting the exact transform their runs were trained with, down to the
+    order in which the flip and the crop consume the RNG.
+    """
+    return PairedGeometricAugmentation(
+        image_size,
+        flip_probability=flip_probability,
+        crop_scale_min=crop_scale_min,
+        crop_scale_max=crop_scale_max
+    )
 
 
 # Empirical mean_chroma band (p2..p98) of the dataset, measured in OpenCV LAB units by

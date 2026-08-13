@@ -110,3 +110,66 @@ def testInputStaysPristine(models: Dict[str, float]) -> None:
 
     assert torch.equal(luminance, before)
     assert torch.equal(network._trainable_network.received[:, 0:1], before)
+
+
+class _InputRecorder(nn.Module):
+    """Frozen submodule stand-in that also records how many channels it was handed."""
+
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self._value: float = value
+        self.received_channels: int = 0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.received_channels = x.shape[1]
+        return torch.full_like(x[:, :1], self._value)
+
+
+def _buildNetworkWithRecordingSubmodules() -> ConvAttenColorizationNetwork:
+    network: ConvAttenColorizationNetwork = _buildNetwork(RGB_MODELS, concatenate_input=True)
+    network._pretrained_models = nn.ModuleDict(
+        {name: _InputRecorder(RGB_MODELS[name]) for name in network._color_model_names}
+    )
+    return network
+
+
+def testSegmentationChannelsReachOnlyTheTrainableNetwork() -> None:
+    """The masks condition the UNet, not the extractors.
+
+    The extractors are frozen and were trained on luminance alone; handing them a channel
+    they have no weights for would fail, and handing them one they do would change what a
+    checkpoint means. So the split happens before they are called.
+    """
+    network: ConvAttenColorizationNetwork = _buildNetworkWithRecordingSubmodules()
+    luminance: torch.Tensor = torch.rand(2, 1, 8, 8)
+    mask_channels: torch.Tensor = torch.rand(2, 2, 8, 8)
+    network(torch.cat([luminance, mask_channels], dim=1))
+
+    for name in network._color_model_names:
+        assert network._pretrained_models[name].received_channels == 1
+
+    received: torch.Tensor = network._trainable_network.received
+    assert received.shape[1] == 6                       # luminance + R,G,B + boundary + area
+    assert torch.equal(received[:, 4:], mask_channels)   # conditioning goes last
+
+
+def testSegmentationChannelsSitBehindThePredictions() -> None:
+    """Channel order is what the architecture JSON's enc1 width is counted against."""
+    network: ConvAttenColorizationNetwork = _buildNetworkWithRecordingSubmodules()
+    luminance: torch.Tensor = torch.rand(2, 1, 8, 8)
+    network(torch.cat([luminance, torch.zeros(2, 2, 8, 8)], dim=1))
+
+    received: torch.Tensor = network._trainable_network.received
+    assert torch.equal(received[:, 0:1], luminance)
+    assert torch.allclose(received[:, 1], torch.full((2, 8, 8), 0.1))
+    assert torch.allclose(received[:, 3], torch.full((2, 8, 8), 0.3))
+
+
+def testAnyNumberOfConditioningChannelsIsRouted() -> None:
+    """boundary_area is 2 channels, boundary_area_hash is 2 + n; neither is special-cased."""
+    for mask_channel_count in (1, 2, 5):
+        network: ConvAttenColorizationNetwork = _buildNetworkWithRecordingSubmodules()
+        network(torch.cat([torch.rand(2, 1, 8, 8),
+                           torch.rand(2, mask_channel_count, 8, 8)], dim=1))
+
+        assert network._trainable_network.received.shape[1] == 4 + mask_channel_count

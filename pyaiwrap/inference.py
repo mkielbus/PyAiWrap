@@ -56,6 +56,10 @@ def colorize(generator: nn.Module, luminance: torch.Tensor, target_channel: str,
              luminance_transfer: str = "srgb") -> torch.Tensor:
     """The model's RGB output for a [B, 1, H, W] luminance input in [0, 1].
 
+    A segmentation-conditioned model takes [B, 1 + C, H, W] instead, luminance first and the
+    encoded label map behind it; everything here works on that stack unchanged, and flip TTA
+    mirrors the conditioning along with the image, as it must.
+
     For an RGB-output model with chroma_scale == 1 and no TTA this is not bit-identical to
     calling the generator directly: the prediction is routed through Lab so that the returned
     image's lightness comes from the input rather than from the model, which is the property
@@ -78,7 +82,10 @@ def colorize(generator: nn.Module, luminance: torch.Tensor, target_channel: str,
     if chroma_scale != 1.0:
         chroma = chroma * chroma_scale
 
-    lightness = luminanceToLabRange(luminance, luminance_transfer)
+    # Channel 0 only: a segmentation-conditioned model is handed [luminance, mask encoding],
+    # and the lightness the output is rebuilt from is the photograph's, not the conditioning's.
+    # For the plain 1-channel case this slice is a no-op.
+    lightness = luminanceToLabRange(luminance[:, :1], luminance_transfer)
     return labToRgb(lightness, chroma).clamp(0.0, 1.0)
 
 

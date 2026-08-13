@@ -2021,8 +2021,15 @@ class ConvAttenColorizationNetwork(nn.Module):
             except Exception as e:
                 raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
-    def _separate_edges(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Split off edge channels stacked after the channels the pretrained models expect"""
+    def _separateAuxiliaryChannels(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Split off conditioning channels stacked after the ones the pretrained models expect.
+
+        Edge maps and SAM segmentation encodings both arrive this way, and both are meant for
+        the trainable network alone: the R/G/B extractors are frozen, were trained on
+        luminance only, and could not read an extra channel even if it were handed to them.
+        Splitting here (rather than in the dataset) keeps the dataset's job to "produce one
+        input tensor" and puts the knowledge of who consumes what in the module that routes it.
+        """
         if x.size(1) <= self._pretrained_input_channels:
             return x, None
         return x[:, :self._pretrained_input_channels], x[:, self._pretrained_input_channels:]
@@ -2042,15 +2049,15 @@ class ConvAttenColorizationNetwork(nn.Module):
         return torch.cat(color_channels, dim=1)  # [B, num_models, H, W]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        model_input, edges = self._separate_edges(x)
+        model_input, auxiliary = self._separateAuxiliaryChannels(x)
         initial_colors = self._generate_color_channels(model_input)
         if self._concatenate_input:
             # Stack the pristine input (luminance) in front of the predictions, so the
             # trainable network sees full LAB / luminance+RGB rather than the frozen
             # extractors' output alone
             initial_colors = torch.cat([model_input, initial_colors], dim=1)
-        if edges is not None:
-            initial_colors = torch.cat([initial_colors, edges], dim=1)
+        if auxiliary is not None:
+            initial_colors = torch.cat([initial_colors, auxiliary], dim=1)
         final_output = self._trainable_network(initial_colors)
         return final_output
 

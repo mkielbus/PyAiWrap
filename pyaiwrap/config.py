@@ -326,7 +326,28 @@ class ColorizationDataConfigBuilder(ConfigBuilder):
             "AUG_REMAP_CLUSTER_NAMES": "",
             # None -> the planner's reviewed defaults (freeze 0.50, support 10).
             "AUG_REMAP_FREEZE_THRESHOLD": None,
-            "AUG_REMAP_MIN_SUPPORT": None
+            "AUG_REMAP_MIN_SUPPORT": None,
+            # SAM segmentation masks as extra conditioning for the trainable network (the
+            # frozen R/G/B extractors never see them). Both paths null = masks off, which is
+            # every config written before them; setting them requires an architecture whose
+            # first encoder block is widened by the encoding's channel count. The label maps
+            # are exported by analysis/remote_masks/sam_export_masks.py: one uint8 PNG per
+            # image named after its stem, laid out as <path>/<split>.
+            "TRAIN_MASK_PATH": None,
+            "VALIDATION_MASK_PATH": None,
+            # boundary_area (2 ch) | boundary_area_hash (2 + MASK_HASH_CHANNELS) | label_id (1).
+            # See pyaiwrap/segmentation_masks.py for what each channel carries and why raw
+            # label ids are the weakest of the three.
+            "MASK_ENCODING": "boundary_area",
+            # 1 keeps the contour exactly where it is; wider survives deeper into the encoder's
+            # stride-2 stages at the cost of localisation.
+            "MASK_BOUNDARY_WIDTH": 1,
+            "MASK_HASH_CHANNELS": 3,
+            # Re-draw the per-region hash vectors every item instead of deriving them from the
+            # region id. Derived-from-id is stable per image for the whole run, i.e. a
+            # fingerprint the network can memorise; re-drawing keeps only the equality relation
+            # the channel exists for. Ignored unless the encoding uses a hash.
+            "MASK_RANDOMIZE_HASH": True
         }
 
     def getCategory(self) -> ConfigCategory:

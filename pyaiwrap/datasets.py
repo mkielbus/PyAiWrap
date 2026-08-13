@@ -11,7 +11,8 @@ import numpy as np
 import pickle
 from scipy.ndimage import zoom
 
-from pyaiwrap.transforms import PathAwareImageTransform
+from pyaiwrap.segmentation_masks import SegmentationMaskEncoder, loadLabelMap
+from pyaiwrap.transforms import PairedGeometricAugmentation, PathAwareImageTransform
 
 
 class EdgesDataset(Dataset):
@@ -41,7 +42,10 @@ class PairedImageFolder(Dataset):
                  segmentation_pairing: Optional[str] = None,
                  shared_augmentation: Optional[Callable] = None,
                  target_augmentation: Optional[Callable] = None,
-                 input_augmentation: Optional[Callable] = None) -> None:
+                 input_augmentation: Optional[Callable] = None,
+                 mask_folder_path: Optional[str] = None,
+                 mask_encoder: Optional[SegmentationMaskEncoder] = None,
+                 image_size: Optional[int] = None) -> None:
         """
         images_folder_path: path to folder with images
         input_transform: transform producing the model input from a PIL image
@@ -61,6 +65,17 @@ class PairedImageFolder(Dataset):
             target_augmentation: the target keeps its true colours while the input's luminance
             is perturbed, which regularises without changing what is being learnt. The two are
             sampled independently, so a sample may receive either, both or neither.
+        mask_folder_path: optional folder of SAM label maps (one uint8 PNG per image, named
+            after the image's stem). The map is co-augmented with the image -- same flip, same
+            crop box, NEAREST resampling -- then encoded by `mask_encoder` and stacked onto
+            the input's channels, behind the channels the pretrained extractors consume. The
+            merge network splits them off again (ConvAttenColorizationNetwork._separateAuxiliaryChannels),
+            so the frozen R/G/B extractors keep seeing luminance alone and only the trainable
+            UNet is conditioned on the segmentation.
+        mask_encoder: how those label maps become channels; defaults to boundary + area.
+        image_size: side the masks are resampled to when there is no augmentation to do it
+            (validation). Inferred from the augmentation or from the input transform's Resize
+            when not given.
 
         The image is decoded once (single ImageFolder with transform=None), which removes the
         previous double-decode and makes the input/target pairing correct by construction.
@@ -70,6 +85,19 @@ class PairedImageFolder(Dataset):
             raise ValueError(
                 "shared_augmentation cannot be combined with segmentation_pairing: edge maps "
                 "are not co-augmented and would misalign with the augmented image."
+            )
+        if segmentation_pairing is not None and mask_folder_path is not None:
+            raise ValueError(
+                "segmentation_pairing and mask_folder_path both stack channels onto the input; "
+                "pick one."
+            )
+        if mask_folder_path is not None and shared_augmentation is not None \
+                and not isinstance(shared_augmentation, PairedGeometricAugmentation):
+            raise ValueError(
+                "mask_folder_path with augmentation requires a PairedGeometricAugmentation "
+                "(see createPairedGeometricAugmentation): the composed transform samples its "
+                "crop internally, so the mask cannot be given the same geometry and would be "
+                "misaligned with the image."
             )
 
         self._dataset: ImageFolder = ImageFolder(images_folder_path, transform=None)
@@ -82,6 +110,14 @@ class PairedImageFolder(Dataset):
         self._edges_dataset: Optional[EdgesDataset] = None
         if segmentation_pairing is not None:
             self._edges_dataset = self._buildEdgesDataset(segmentation_pairing, input_transform)
+
+        self._mask_filepaths: Optional[List[str]] = None
+        self._mask_encoder: Optional[SegmentationMaskEncoder] = None
+        self._mask_image_size: Optional[int] = None
+        if mask_folder_path is not None:
+            self._mask_filepaths = self._buildMaskFilepaths(mask_folder_path)
+            self._mask_encoder = mask_encoder or SegmentationMaskEncoder()
+            self._mask_image_size = self._resolveMaskImageSize(image_size, input_transform)
 
     def _buildEdgesDataset(self, segmentation_pairing: str, input_transform: Callable) -> EdgesDataset:
         """Build an edges dataset ordered like the base dataset from the pairing csv"""
@@ -102,6 +138,39 @@ class PairedImageFolder(Dataset):
             edges_filepaths.append(edges_by_filename[filename])
 
         return EdgesDataset(edges_filepaths, self._findResizeTransform(input_transform))
+
+    def _buildMaskFilepaths(self, mask_folder_path: str) -> List[str]:
+        """Pair every image with its label map by filename stem, in dataset order.
+
+        A missing map is an error rather than a silently unconditioned sample: the model has
+        the channels wired into enc1, so a gap would have to be filled with something, and
+        every choice of filler teaches the network that "no segmentation" is a state the
+        world can be in.
+        """
+        mask_filepaths: List[str] = []
+        for image_path, _label in self._dataset.samples:
+            stem: str = os.path.splitext(os.path.basename(image_path))[0]
+            mask_path: str = os.path.join(mask_folder_path, f"{stem}.png")
+            if not os.path.isfile(mask_path):
+                raise ValueError(f"No label map {mask_path} for image {image_path}")
+            mask_filepaths.append(mask_path)
+        return mask_filepaths
+
+    def _resolveMaskImageSize(self, image_size: Optional[int], input_transform: Callable) -> int:
+        """The side a label map is resampled to when no augmentation is doing the resampling."""
+        if image_size is not None:
+            return image_size
+        if isinstance(self._shared_augmentation, PairedGeometricAugmentation):
+            return self._shared_augmentation.image_size
+
+        resize: Optional[transforms.Resize] = self._findResizeTransform(input_transform)
+        if resize is None:
+            raise ValueError(
+                "mask_folder_path needs image_size: it could not be inferred from the "
+                "augmentation or from a Resize in the input transform."
+            )
+        size = resize.size
+        return size if isinstance(size, int) else size[0]
 
     @staticmethod
     def _findResizeTransform(input_transform: Callable) -> Optional[transforms.Resize]:
@@ -126,10 +195,41 @@ class PairedImageFolder(Dataset):
             return self._target_augmentation(image, self._dataset.samples[idx][0])
         return self._target_augmentation(image)
 
+    def _loadMask(self, idx: int) -> Image.Image:
+        return loadLabelMap(self._mask_filepaths[idx])
+
+    def _encodeMask(self, mask: Image.Image) -> torch.Tensor:
+        return self._mask_encoder(np.asarray(mask, dtype=np.uint8))
+
+    def _resizeMask(self, mask: Image.Image) -> Image.Image:
+        """Validation's square-off, mirroring what the input transform's Resize does."""
+        size: int = self._mask_image_size
+        if mask.size == (size, size):
+            return mask
+        return mask.resize((size, size), Image.NEAREST)
+
+    def _applySharedAugmentation(self, image: Image.Image, mask: Optional[Image.Image]
+                                 ) -> Tuple[Image.Image, Optional[Image.Image]]:
+        """One geometric draw for the image, the target, and the label map alike."""
+        if not isinstance(self._shared_augmentation, PairedGeometricAugmentation):
+            return self._shared_augmentation(image), mask
+
+        width, height = image.size
+        parameters = self._shared_augmentation.sampleParameters(width, height)
+        image = self._shared_augmentation.applyToImage(image, parameters)
+        if mask is not None:
+            mask = self._shared_augmentation.applyToMask(mask, parameters)
+        return image, mask
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
         image, label = self._dataset[idx]           # PIL RGB image, decoded once
+        mask: Optional[Image.Image] = self._loadMask(idx) if self._mask_filepaths is not None else None
+
         if self._shared_augmentation is not None:
-            image = self._shared_augmentation(image)  # single geometric op shared by both branches
+            # single geometric op shared by both branches, and by the label map when there is one
+            image, mask = self._applySharedAugmentation(image, mask)
+        elif mask is not None:
+            mask = self._resizeMask(mask)
 
         target_image = image
         if self._target_augmentation is not None:
@@ -145,6 +245,9 @@ class PairedImageFolder(Dataset):
         if self._edges_dataset is not None:
             edges_img: torch.Tensor = self._edges_dataset[idx]
             model_input = torch.cat([model_input, edges_img], dim=0)
+
+        if mask is not None:
+            model_input = torch.cat([model_input, self._encodeMask(mask)], dim=0)
 
         return model_input, target, label, label
 
