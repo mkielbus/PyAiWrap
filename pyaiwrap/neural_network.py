@@ -1183,32 +1183,53 @@ class LuminanceEncoder(nn.Module):
 
 
 class PixelDecoder(nn.Module):
+    """Grows the encoder pyramid back to full resolution, with or without self-attention.
+
+    `use_attention=True` -- the default, and what every checkpoint trained so far contains --
+    runs a self-attention TransformerBlock over the tokens of each scale before upsampling it.
+    `use_attention=False` removes those blocks and leaves the convolutional path alone: skip
+    addition, then conv + PixelShuffle. That is the pixel decoder of the original DDColor,
+    where attention lives only in the colour decoder, and it exists here so the contribution of
+    the extra attention can be measured rather than assumed. The blocks are not constructed at
+    all in that case, so such a run neither trains nor stores their weights; the flag is part
+    of the architecture JSON, so a checkpoint states which of the two it is.
+
+    Nothing else changes with the flag except the positional encoding fed to the blocks, which
+    goes with them: it exists to give attention a sense of place, and convolutions carry
+    spatial structure themselves. The second positional encoding -- the one added to the
+    multi-scale features handed to the colour decoder -- is unaffected, since the colour
+    decoder still attends over them.
+    """
+
     def __init__(self,
                  encoder_channels: List[int],
                  embed_dim: int = 512,
                  num_heads: int = 8,
                  mlp_ratio: int = 4,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_attention: bool = True):
         super().__init__()
 
         self.embed_dim = embed_dim
         self.num_layers = len(encoder_channels)
+        self.use_attention = use_attention
 
         self.transformer_blocks = nn.ModuleList()
         decoder_channels = list(reversed(encoder_channels))
 
-        for i in range(self.num_layers):
-            current_dim = decoder_channels[i]
-            transformer_block = TransformerBlock(
-                dim=current_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                dropout=dropout,
-                use_self_attention=True,
-                use_cross_attention=False,
-                use_causal_mask=False
-            )
-            self.transformer_blocks.append(transformer_block)
+        if use_attention:
+            for i in range(self.num_layers):
+                current_dim = decoder_channels[i]
+                transformer_block = TransformerBlock(
+                    dim=current_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                    use_self_attention=True,
+                    use_cross_attention=False,
+                    use_causal_mask=False
+                )
+                self.transformer_blocks.append(transformer_block)
 
         self.upsample_layers = nn.ModuleList()
         self.output_projections = nn.ModuleList()
@@ -1254,21 +1275,24 @@ class PixelDecoder(nn.Module):
                 b_res, c_res, h_res, w_res = residual_input.shape
                 residual_patches = residual_input.view(b_res, c_res, -1).transpose(1, 2)  # [batch_size, h_res*w_res, decoder_channels[i]]
 
-                transformer_input = current_features + residual_patches
+                scale_input = current_features + residual_patches
                 h_res = residual_input.shape[2]
                 w_res = residual_input.shape[3]
             else:
-                transformer_input = current_features
+                scale_input = current_features
                 h_res = h_enc
                 w_res = w_enc
 
-            pos_encoding = sinusoidalPositionalEncoding2D(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
-            transformer_input_with_pos = transformer_input + pos_encoding
+            if self.use_attention:
+                pos_encoding = sinusoidalPositionalEncoding2D(h_res, w_res, current_features.shape[-1], device)  # [1, h_res*w_res, decoder_channels[i]]
+                scale_input_with_pos = scale_input + pos_encoding
 
-            transformer_output = self.transformer_blocks[i](transformer_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
+                scale_features = self.transformer_blocks[i](scale_input_with_pos)  # [batch_size, h_res*w_res, decoder_channels[i]]
+            else:
+                scale_features = scale_input  # [batch_size, h_res*w_res, decoder_channels[i]]
 
-            b, n_patches, c = transformer_output.shape
-            spatial_features = transformer_output.transpose(1, 2).view(b, c, h_res, w_res)  # [batch_size, decoder_channels[i], h_res, w_res]
+            b, n_patches, c = scale_features.shape
+            spatial_features = scale_features.transpose(1, 2).view(b, c, h_res, w_res)  # [batch_size, decoder_channels[i], h_res, w_res]
 
             upsampled_features = self.upsample_layers[i](spatial_features)  # [batch_size, out_channels, h_up, w_up]
 
@@ -1728,7 +1752,8 @@ class ColorMemoryTransformer(nn.Module):
                  pretrained_encoder: Optional[str] = None,
                  pretrained_encoder_stage_channels: Optional[List[int]] = None,
                  cluster_color_prior: Optional[Dict[str, Any]] = None,
-                 quantized_chroma_head: Optional[Dict[str, Any]] = None):
+                 quantized_chroma_head: Optional[Dict[str, Any]] = None,
+                 pixel_decoder_attention: bool = True):
         """
         pretrained_encoder: name of a frozen ImageNet backbone to use as the luminance encoder
             ("convnext_tiny"), replacing the from-scratch encoder built from
@@ -1742,6 +1767,10 @@ class ColorMemoryTransformer(nn.Module):
         cluster_color_prior: constructor kwargs for ClusterColorPrior, or None to leave the
             colour queries unconditioned. Requires a pretrained encoder, since the prior reads
             the same frozen backbone rather than running a second one.
+        pixel_decoder_attention: whether the pixel decoder keeps its per-scale self-attention
+            blocks. False leaves a purely convolutional pixel decoder, as in the original
+            DDColor, with attention only in the colour decoder; see PixelDecoder. True is the
+            historical behaviour.
         """
         super().__init__()
 
@@ -1760,7 +1789,8 @@ class ColorMemoryTransformer(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
-            dropout=dropout
+            dropout=dropout,
+            use_attention=pixel_decoder_attention
         )
 
         self.pixel_decoder_layers = self.pixel_decoder.num_layers
